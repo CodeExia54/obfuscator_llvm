@@ -31,7 +31,8 @@ jobs:
           cmake \
           ninja-build \
           git \
-          python3
+          python3 \
+          lld  # ← LLD FIX ADDED HERE
 
     - name: Configure Android ARM64 cross-compiler
       run: |
@@ -63,7 +64,7 @@ jobs:
           -DLLVM_INCLUDE_TESTS=OFF \
           -DLLVM_INCLUDE_EXAMPLES=OFF \
           -DLLVM_BUILD_TOOLS=OFF \
-          -DLLVM_ENABLE_LLD=OFF \
+          -DLLVM_ENABLE_LLD=ON \  # ← Can keep LLD enabled since we installed it
           
           -G "Ninja"
         
