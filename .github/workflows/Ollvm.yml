@@ -1,119 +1,322 @@
-name: Build OLLVM Clang for Android arm64 only clang
+name: Build Android ARM64 Cross-Compiler with OLLVM
 
 on:
+  workflow_dispatch:
   push:
     branches: [ release/14.x ]
-  workflow_dispatch:
 
 jobs:
-  build-ollvm-clang:
+  build-android-arm64-cross:
     runs-on: ubuntu-22.04
     
     steps:
     - name: Checkout OLLVM
       uses: actions/checkout@v4
       with:
-        submodules: recursive
+        repository: sr-tream/obfuscator
         ref: release/14.x
+        submodules: recursive
 
     - name: Apply OLLVM patch
       run: |
         cd llvm-project
         git apply ../obfuscator.patch
-        echo "OLLVM patch applied"
+        echo "✅ OLLVM obfuscation patches applied"
 
     - name: Install build tools
       run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential cmake make git
+        sudo apt update
+        sudo apt install -y \
+          build-essential \
+          cmake \
+          ninja-build \
+          git \
+          python3
 
-    - name: Configure for clang (arm64 target)
+    - name: Configure Android ARM64 cross-compiler
       run: |
         mkdir -p build
         cd build
+        
+        # This builds clang that:
+        # 1. Runs on x86_64 Linux (host)
+        # 2. Compiles code for Android ARM64 (target)
+        # 3. Has OLLVM obfuscation built-in
         cmake ../llvm-project/llvm \
           -DCMAKE_BUILD_TYPE=Release \
           -DLLVM_ENABLE_PROJECTS="clang" \
+          
+          # HOST: clang runs on x86_64 Linux
+          -DCMAKE_HOST_SYSTEM_PROCESSOR="x86_64" \
+          -DLLVM_HOST_TRIPLE="x86_64-unknown-linux-gnu" \
+          
+          # TARGET: produces Android ARM64 code
           -DLLVM_TARGETS_TO_BUILD="AArch64" \
+          -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-android" \
+          
+          # Cross-compilation settings
+          -DCMAKE_SYSTEM_NAME="Linux" \
+          -DCMAKE_SYSTEM_PROCESSOR="aarch64" \
+          
+          # OLLVM will be included automatically via patch
           -DLLVM_ENABLE_RUNTIMES="" \
           -DLLVM_INCLUDE_TESTS=OFF \
           -DLLVM_INCLUDE_EXAMPLES=OFF \
           -DLLVM_BUILD_TOOLS=OFF \
-          -G "Unix Makefiles"
-        echo "Configured for Android arm64"
+          -DLLVM_ENABLE_LLD=OFF \
+          
+          -G "Ninja"
+        
+        echo "✅ Configured: x86_64 → Android ARM64 cross-compiler with OLLVM"
 
-    - name: Build clang
+    - name: Build clang cross-compiler
       run: |
         cd build
-        make clang -j$(nproc)
-        echo "Clang built successfully"
+        ninja clang -j$(nproc)
+        echo "✅ Android ARM64 cross-compiler built"
 
-    - name: Test OLLVM for Android arm64
+    - name: Verify cross-compiler architecture
+      run: |
+        echo "=== Checking clang binary ==="
+        file build/bin/clang
+        echo ""
+        
+        # It should say: "ELF 64-bit LSB executable, x86-64"
+        # NOT "ARM aarch64"
+        
+        echo "Clang is built for: $(file build/bin/clang | grep -o "x86-64\|ARM aarch64" || echo "unknown")"
+        echo ""
+        
+        if file build/bin/clang | grep -q "x86-64"; then
+          echo "✅ CORRECT: clang runs on x86_64 (host)"
+        else
+          echo "❌ WRONG: clang is not x86_64"
+          exit 1
+        fi
+
+    - name: Test Android ARM64 compilation
       run: |
         export PATH=$PWD/build/bin:$PATH
         
-        echo "=== Testing Clang ==="
-        clang --version
+        echo "=== Testing Android ARM64 target ==="
         
-        echo "=== Testing Android arm64 target ==="
-        cat > test.c << 'EOF'
-        int add(int a, int b) {
-            return a + b;
+        # Create test program
+        cat > test_android.c << 'EOF'
+        #include <stdio.h>
+        
+        int calculate(int a, int b) {
+            return a * b + 42;
         }
+        
         int main() {
-            return add(2, 3);
+            printf("Result: %d\n", calculate(5, 3));
+            return 0;
         }
         EOF
         
-        # Test normal compilation
-        clang -target aarch64-linux-android21 -c test.c -o test.o
-        echo "✅ Normal compilation works"
+        echo "1. Compile for Android ARM64 (API 21):"
+        clang -target aarch64-linux-android21 -c test_android.c -o test_android.o
         
-        # Test OLLVM obfuscation
-        echo "=== Testing OLLVM obfuscation ==="
-        clang -target aarch64-linux-android21 -mllvm -fla -c test.c -o test_fla.o && echo "✅ Control Flow Flattening works"
-        clang -target aarch64-linux-android21 -mllvm -sub -c test.c -o test_sub.o && echo "✅ Instruction Substitution works"
-        clang -target aarch64-linux-android21 -mllvm -bcf -c test.c -o test_bcf.o && echo "✅ Bogus Control Flow works"
+        if [ $? -eq 0 ] && [ -f "test_android.o" ]; then
+          echo "✅ SUCCESS: Can compile Android ARM64 code"
+          echo "Output file:"
+          file test_android.o
+          
+          # Verify it's ARM64
+          if file test_android.o | grep -q "ARM aarch64"; then
+            echo "✅ CONFIRMED: Produces ARM64 binaries"
+          else
+            echo "❌ ERROR: Not producing ARM64"
+            exit 1
+          fi
+        else
+          echo "❌ FAILED: Cannot compile for Android ARM64"
+          exit 1
+        fi
+        
+        echo ""
+        echo "2. Test OLLVM obfuscation on Android ARM64:"
+        clang -target aarch64-linux-android21 -mllvm -fla -c test_android.c -o test_ollvm.o
+        
+        if [ $? -eq 0 ]; then
+          echo "✅ OLLVM Control Flow Flattening works"
+          
+          # Compare sizes
+          if [ -f "test_android.o" ] && [ -f "test_ollvm.o" ]; then
+            NORMAL_SIZE=$(stat -c%s test_android.o)
+            OLLVM_SIZE=$(stat -c%s test_ollvm.o)
+            
+            if [ $OLLVM_SIZE -gt $NORMAL_SIZE ]; then
+              INCREASE=$(( (OLLVM_SIZE * 100) / NORMAL_SIZE - 100 ))
+              echo "✅ OLLVM increases size by $INCREASE% (expected)"
+            fi
+          fi
+        fi
+        
+        echo ""
+        echo "3. Test all OLLVM features:"
+        clang -target aarch64-linux-android21 \
+          -mllvm -fla \
+          -mllvm -sub \
+          -mllvm -bcf \
+          -c test_android.c -o test_all_ollvm.o 2>&1
+        
+        if [ $? -eq 0 ]; then
+          echo "✅ All OLLVM features work on Android ARM64"
+        fi
 
-    - name: Create clang package
+    - name: Create cross-compiler package
       run: |
-        mkdir -p clang-ollvm-android-arm64/bin
-        cp build/bin/clang clang-ollvm-android-arm64/bin/
-        cp build/bin/clang++ clang-ollvm-android-arm64/bin/
+        mkdir -p android-arm64-ollvm-cc
+        mkdir -p android-arm64-ollvm-cc/bin
         
-        cat > clang-ollvm-android-arm64/usage.txt << 'EOF'
-        OLLVM Clang for Android ARM64 (Linux host)
-        ===========================================
+        # Copy the cross-compiler
+        cp build/bin/clang android-arm64-ollvm-cc/bin/
+        cp build/bin/clang++ android-arm64-ollvm-cc/bin/
         
-        This clang has OLLVM obfuscation built-in.
+        # Create verification script
+        cat > android-arm64-ollvm-cc/verify.sh << 'EOF'
+        #!/bin/bash
+        echo "=== Android ARM64 OLLVM Cross-Compiler Verification ==="
+        echo ""
         
-        Usage for Android arm64:
-        ------------------------
-        ./bin/clang -target aarch64-linux-android21 -mllvm -fla -mllvm -sub source.c
+        echo "1. Host architecture (where clang runs):"
+        ./bin/clang --version | head -3
+        echo ""
         
-        Available OLLVM options:
-        -mllvm -fla      : Control Flow Flattening
-        -mllvm -sub      : Instruction Substitution  
-        -mllvm -bcf      : Bogus Control Flow
-        -mllvm -sobf     : String Obfuscation
-        -mllvm -split    : Basic Block Splitting (use with -fla)
+        echo "2. Testing Android ARM64 target:"
+        cat > test.c << 'CCODE'
+        int android_function(int x, int y) {
+            int sum = 0;
+            for (int i = 0; i < x; i++) {
+                sum += y * i;
+            }
+            return sum;
+        }
+        CCODE
         
-        Example with linker:
-        ./bin/clang -target aarch64-linux-android21 -mllvm -fla app.c -o app -fuse-ld=lld
+        # Compile for Android ARM64
+        ./bin/clang -target aarch64-linux-android21 -c test.c -o test.o 2>&1
         
-        Android API levels:
-        aarch64-linux-android21  : Android 5.0+ (API 21)
-        aarch64-linux-android24  : Android 7.0+ (API 24)
-        aarch64-linux-android29  : Android 10+ (API 29)
+        if [ $? -eq 0 ] && [ -f "test.o" ]; then
+            echo "✅ SUCCESS: Cross-compiler works"
+            
+            # Check architecture
+            if file test.o | grep -q "ARM aarch64"; then
+                echo "✅ Produces ARM64 Android binaries"
+            else
+                echo "Output file type:"
+                file test.o
+            fi
+        else
+            echo "❌ FAILED: Not a working Android ARM64 cross-compiler"
+            exit 1
+        fi
+        
+        echo ""
+        echo "3. Testing OLLVM obfuscation:"
+        ./bin/clang -target aarch64-linux-android21 -mllvm -fla -mllvm -sub -c test.c -o test_ollvm.o 2>&1
+        
+        if [ $? -eq 0 ]; then
+            echo "✅ OLLVM obfuscation is working"
+            
+            # Show size difference
+            if [ -f "test.o" ] && [ -f "test_ollvm.o" ]; then
+                NORMAL=$(stat -c%s test.o 2>/dev/null || echo 0)
+                OLLVM=$(stat -c%s test_ollvm.o 2>/dev/null || echo 0)
+                
+                if [ $NORMAL -gt 0 ] && [ $OLLVM -gt $NORMAL ]; then
+                    INCREASE=$(( (OLLVM * 100) / NORMAL - 100 ))
+                    echo "✅ Obfuscation increases size by $INCREASE%"
+                fi
+            fi
+        else
+            echo "❌ OLLVM not working"
+        fi
+        
+        rm -f test.c test.o test_ollvm.o 2>/dev/null
+        echo ""
+        echo "=== Verification Complete ==="
+        echo "This is a cross-compiler that:"
+        echo "1. Runs on x86_64 Linux"
+        echo "2. Compiles code for Android ARM64"
+        echo "3. Includes OLLVM obfuscation"
         EOF
         
-        tar -czf clang-ollvm-android-arm64.tar.gz clang-ollvm-android-arm64/
-        echo "Package size: $(du -h clang-ollvm-android-arm64.tar.gz | cut -f1)"
+        chmod +x android-arm64-ollvm-cc/verify.sh
+        
+        # Create usage examples
+        cat > android-arm64-ollvm-cc/USAGE.md << 'EOF'
+        # Android ARM64 OLLVM Cross-Compiler
+        
+        ## What this is:
+        - **Clang compiler** that runs on x86_64 Linux
+        - **Produces Android ARM64** (AArch64) binaries
+        - **OLLVM obfuscation** built-in
+        
+        ## Usage:
+        
+        ### Basic Android ARM64 compilation:
+        ```bash
+        ./bin/clang -target aarch64-linux-android21 app.c -o app
+        ```
+        
+        ### With OLLVM obfuscation:
+        ```bash
+        ./bin/clang -target aarch64-linux-android21 \
+          -mllvm -fla \
+          -mllvm -sub \
+          app.c -o obfuscated_app
+        ```
+        
+        ### Advanced OLLVM options:
+        ```bash
+        # Control Flow Flattening with splitting
+        -mllvm -fla -mllvm -split -mllvm -split_num=3
+        
+        # Instruction Substitution with loops
+        -mllvm -sub -mllvm -sub_loop=2
+        
+        # Bogus Control Flow with probability
+        -mllvm -bcf -mllvm -bcf_loop=3 -mllvm -bcf_prob=40
+        
+        # String obfuscation
+        -mllvm -sobf
+        
+        # All together
+        -mllvm -fla -mllvm -sub -mllvm -bcf -mllvm -sobf
+        ```
+        
+        ### Android API levels:
+        ```bash
+        # Android 5.0+ (API 21)
+        -target aarch64-linux-android21
+        
+        # Android 7.0+ (API 24)
+        -target aarch64-linux-android24
+        
+        # Android 10+ (API 29)
+        -target aarch64-linux-android29
+        
+        # Android 13+ (API 33)
+        -target aarch64-linux-android33
+        ```
+        
+        ## Verify:
+        ```bash
+        ./verify.sh
+        ```
+        EOF
+        
+        # Package
+        tar -czf android-arm64-ollvm-cross.tar.gz android-arm64-ollvm-cc/
+        
+        echo "✅ Android ARM64 cross-compiler package created"
+        ls -lh android-arm64-ollvm-cross.tar.gz
 
-    - name: Upload clang binary
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: clang-ollvm-android-arm64
-        path: |
-          clang-ollvm-android-arm64.tar.gz
-          build/bin/clang
+        name: android-arm64-ollvm-cross-compiler
+        path: android-arm64-ollvm-cross.tar.gz
+        retention-days: 30
