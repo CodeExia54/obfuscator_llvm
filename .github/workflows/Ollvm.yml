@@ -1,0 +1,119 @@
+name: Build OLLVM Clang for Android arm64 only clang
+
+on:
+  push:
+    branches: [ release/14.x ]
+  workflow_dispatch:
+
+jobs:
+  build-ollvm-clang:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Checkout OLLVM
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        ref: release/14.x
+
+    - name: Apply OLLVM patch
+      run: |
+        cd llvm-project
+        git apply ../obfuscator.patch
+        echo "OLLVM patch applied"
+
+    - name: Install build tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake make git
+
+    - name: Configure for clang (arm64 target)
+      run: |
+        mkdir -p build
+        cd build
+        cmake ../llvm-project/llvm \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLVM_ENABLE_PROJECTS="clang" \
+          -DLLVM_TARGETS_TO_BUILD="AArch64" \
+          -DLLVM_ENABLE_RUNTIMES="" \
+          -DLLVM_INCLUDE_TESTS=OFF \
+          -DLLVM_INCLUDE_EXAMPLES=OFF \
+          -DLLVM_BUILD_TOOLS=OFF \
+          -G "Unix Makefiles"
+        echo "Configured for Android arm64"
+
+    - name: Build clang
+      run: |
+        cd build
+        make clang -j$(nproc)
+        echo "Clang built successfully"
+
+    - name: Test OLLVM for Android arm64
+      run: |
+        export PATH=$PWD/build/bin:$PATH
+        
+        echo "=== Testing Clang ==="
+        clang --version
+        
+        echo "=== Testing Android arm64 target ==="
+        cat > test.c << 'EOF'
+        int add(int a, int b) {
+            return a + b;
+        }
+        int main() {
+            return add(2, 3);
+        }
+        EOF
+        
+        # Test normal compilation
+        clang -target aarch64-linux-android21 -c test.c -o test.o
+        echo "✅ Normal compilation works"
+        
+        # Test OLLVM obfuscation
+        echo "=== Testing OLLVM obfuscation ==="
+        clang -target aarch64-linux-android21 -mllvm -fla -c test.c -o test_fla.o && echo "✅ Control Flow Flattening works"
+        clang -target aarch64-linux-android21 -mllvm -sub -c test.c -o test_sub.o && echo "✅ Instruction Substitution works"
+        clang -target aarch64-linux-android21 -mllvm -bcf -c test.c -o test_bcf.o && echo "✅ Bogus Control Flow works"
+
+    - name: Create clang package
+      run: |
+        mkdir -p clang-ollvm-android-arm64/bin
+        cp build/bin/clang clang-ollvm-android-arm64/bin/
+        cp build/bin/clang++ clang-ollvm-android-arm64/bin/
+        
+        cat > clang-ollvm-android-arm64/usage.txt << 'EOF'
+        OLLVM Clang for Android ARM64 (Linux host)
+        ===========================================
+        
+        This clang has OLLVM obfuscation built-in.
+        
+        Usage for Android arm64:
+        ------------------------
+        ./bin/clang -target aarch64-linux-android21 -mllvm -fla -mllvm -sub source.c
+        
+        Available OLLVM options:
+        -mllvm -fla      : Control Flow Flattening
+        -mllvm -sub      : Instruction Substitution  
+        -mllvm -bcf      : Bogus Control Flow
+        -mllvm -sobf     : String Obfuscation
+        -mllvm -split    : Basic Block Splitting (use with -fla)
+        
+        Example with linker:
+        ./bin/clang -target aarch64-linux-android21 -mllvm -fla app.c -o app -fuse-ld=lld
+        
+        Android API levels:
+        aarch64-linux-android21  : Android 5.0+ (API 21)
+        aarch64-linux-android24  : Android 7.0+ (API 24)
+        aarch64-linux-android29  : Android 10+ (API 29)
+        EOF
+        
+        tar -czf clang-ollvm-android-arm64.tar.gz clang-ollvm-android-arm64/
+        echo "Package size: $(du -h clang-ollvm-android-arm64.tar.gz | cut -f1)"
+
+    - name: Upload clang binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: clang-ollvm-android-arm64
+        path: |
+          clang-ollvm-android-arm64.tar.gz
+          build/bin/clang
