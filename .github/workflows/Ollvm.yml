@@ -32,41 +32,15 @@ jobs:
           ninja-build \
           git \
           python3 \
-          lld  # ← LLD FIX ADDED HERE
+          lld
 
     - name: Configure Android ARM64 cross-compiler
       run: |
         mkdir -p build
         cd build
         
-        # This builds clang that:
-        # 1. Runs on x86_64 Linux (host)
-        # 2. Compiles code for Android ARM64 (target)
-        # 3. Has OLLVM obfuscation built-in
-        cmake ../llvm-project/llvm \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DLLVM_ENABLE_PROJECTS="clang" \
-          
-          # HOST: clang runs on x86_64 Linux
-          -DCMAKE_HOST_SYSTEM_PROCESSOR="x86_64" \
-          -DLLVM_HOST_TRIPLE="x86_64-unknown-linux-gnu" \
-          
-          # TARGET: produces Android ARM64 code
-          -DLLVM_TARGETS_TO_BUILD="AArch64" \
-          -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-android" \
-          
-          # Cross-compilation settings
-          -DCMAKE_SYSTEM_NAME="Linux" \
-          -DCMAKE_SYSTEM_PROCESSOR="aarch64" \
-          
-          # OLLVM will be included automatically via patch
-          -DLLVM_ENABLE_RUNTIMES="" \
-          -DLLVM_INCLUDE_TESTS=OFF \
-          -DLLVM_INCLUDE_EXAMPLES=OFF \
-          -DLLVM_BUILD_TOOLS=OFF \
-          -DLLVM_ENABLE_LLD=ON \  # ← Can keep LLD enabled since we installed it
-          
-          -G "Ninja"
+        # Single line CMake command to avoid line break issues
+        cmake ../llvm-project/llvm -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS="clang" -DCMAKE_HOST_SYSTEM_PROCESSOR="x86_64" -DLLVM_HOST_TRIPLE="x86_64-unknown-linux-gnu" -DLLVM_TARGETS_TO_BUILD="AArch64" -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-android" -DCMAKE_SYSTEM_NAME="Linux" -DCMAKE_SYSTEM_PROCESSOR="aarch64" -DLLVM_ENABLE_RUNTIMES="" -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_BUILD_TOOLS=OFF -DLLVM_ENABLE_LLD=ON -G "Ninja"
         
         echo "✅ Configured: x86_64 → Android ARM64 cross-compiler with OLLVM"
 
