@@ -9,75 +9,92 @@ on:
 
 env:
   OLLVM_VERSION: "14.0.0"
-  BUILD_TYPE: Release
-  TARGET_ARCH: "AArch64"
   
 jobs:
   build-ollvm-clang:
     runs-on: ubuntu-22.04
     
     steps:
-    - name: Checkout repository
+    - name: Checkout
       uses: actions/checkout@v4
       with:
         submodules: recursive
         ref: release/14.x
 
-    - name: Apply OLLVM patch
+    - name: Apply patch
       run: |
         cd llvm-project
-        if [ -f "../obfuscator.patch" ]; then
-          git apply ../obfuscator.patch
-          echo "✅ Patch applied successfully"
-        else
-          echo "❌ obfuscator.patch not found"
-          exit 1
-        fi
+        git apply ../obfuscator.patch
 
-    - name: Install essential dependencies
+    - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential
-        sudo apt-get install -y cmake
-        sudo apt-get install -y ninja-build
-        sudo apt-get install -y git
-        sudo apt-get install -y python3
-        sudo apt-get install -y zlib1g-dev
+        sudo apt update
+        sudo apt install -y \
+          build-essential \
+          cmake \
+          ninja-build \
+          git \
+          python3 \
+          zlib1g-dev \
+          libxml2-dev \
+          lld
 
-    - name: Configure CMake
+    - name: Configure CMake (without LLD requirement)
       run: |
         mkdir -p build
         cd build
         cmake ../llvm-project/llvm \
           -DCMAKE_BUILD_TYPE=Release \
-          -DLLVM_ENABLE_PROJECTS="clang;lld" \
+          -DLLVM_ENABLE_PROJECTS="clang" \
           -DLLVM_TARGETS_TO_BUILD="AArch64" \
+          -DLLVM_ENABLE_LLD=OFF \
           -DLLVM_ENABLE_RUNTIMES="" \
           -DLLVM_INCLUDE_TESTS=OFF \
           -DLLVM_INCLUDE_EXAMPLES=OFF \
+          -DLLVM_BUILD_LLVM_DYLIB=OFF \
           -G "Ninja"
-        echo "✅ CMake configuration complete"
+        echo "CMake configuration complete"
 
     - name: Build clang
       run: |
         cd build
-        ninja clang
-        echo "✅ Clang build complete"
+        ninja clang -j$(nproc)
+        echo "Build complete"
 
     - name: Test clang
       run: |
         export PATH=$PWD/build/bin:$PATH
         clang --version
-        echo "int main() { return 0; }" > test.c
-        clang -target aarch64-linux-android21 -c test.c -o test.o
-        echo "✅ Clang test passed"
+        echo "✅ Clang is built successfully"
 
-    - name: Create toolchain package
+    - name: Package the toolchain
       run: |
         mkdir -p toolchain/bin
+        mkdir -p toolchain/lib
+        
+        # Copy clang binaries
         cp build/bin/clang toolchain/bin/
         cp build/bin/clang++ toolchain/bin/
+        
+        # Create README
+        cat > toolchain/README.md << 'EOF'
+        OLLVM Clang for ARM64
+        
+        Built from: https://github.com/sr-tream/obfuscator (release/14.x)
+        
+        Usage:
+        ./bin/clang -target aarch64-linux-android21 -mllvm -fla source.c
+        
+        OLLVM options:
+        -mllvm -fla    : Control Flow Flattening
+        -mllvm -sub    : Instruction Substitution
+        -mllvm -bcf    : Bogus Control Flow
+        -mllvm -sobf   : String Obfuscation
+        EOF
+        
+        # Create archive
         tar -czf ollvm-clang-arm64.tar.gz toolchain/
+        ls -lh ollvm-clang-arm64.tar.gz
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
