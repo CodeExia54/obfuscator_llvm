@@ -1,4 +1,4 @@
-name: Build OLLVM for Android NDK (arm64)
+name: Build OLLVM Clang for arm64
 
 on:
   push:
@@ -13,8 +13,8 @@ env:
   TARGET_ARCH: "AArch64"
   
 jobs:
-  build-ollvm:
-    runs-on: ubuntu-latest
+  build-ollvm-clang:
+    runs-on: ubuntu-22.04  # Ubuntu 22.04 LTS (Jammy)
     
     steps:
     - name: Checkout repository
@@ -23,96 +23,74 @@ jobs:
         submodules: recursive
         ref: release/14.x
 
-    - name: Setup Android NDK
-      run: |
-        # Download Android NDK
-        wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
-        unzip android-ndk-r25c-linux.zip
-        export ANDROID_NDK=$PWD/android-ndk-r25c
-        echo "ANDROID_NDK=$ANDROID_NDK" >> $GITHUB_ENV
-        
-        # Get bundled LLVM version
-        ANDLLVM=$(ls $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/)
-        echo "ANDLLVM=$ANDLLVM" >> $GITHUB_ENV
-        echo "OLLVM_VERSION=$OLLVM_VERSION" >> $GITHUB_ENV
-
     - name: Apply OLLVM patch
       run: |
         cd llvm-project
         git apply ../obfuscator.patch
         echo "Patch applied successfully"
 
-    - name: Install dependencies
+    - name: Install dependencies for Ubuntu 22.04
       run: |
         sudo apt-get update
         sudo apt-get install -y \
           build-essential \
           cmake \
+          cmake-data \
           ninja-build \
           python3 \
+          python3-pip \
           git \
-          libncurses6-dev \
+          libncurses5-dev \  # Available in Ubuntu 22.04
+          libncursesw5-dev \
           libxml2-dev \
           libedit-dev \
+          libedit2 \
           swig \
-          zlib1g-dev
+          zlib1g-dev \
+          zlib1g
 
-    - name: Configure CMake for arm64
+    - name: Configure CMake for clang only (arm64)
       run: |
         mkdir -p build
         cd build
         cmake \
           -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
           -DLLVM_ENABLE_PROJECTS="clang;lld" \
+          -DLLVM_ENABLE_RUNTIMES="" \
+          -DLLVM_ENABLE_BINDINGS=OFF \
+          -DLLVM_INCLUDE_TESTS=OFF \
+          -DLLVM_INCLUDE_EXAMPLES=OFF \
+          -DLLVM_INCLUDE_BENCHMARKS=OFF \
           -DLLVM_ENABLE_LLD=ON \
           -DLLVM_STATIC_LINK_CXX_STDLIB=ON \
           -DLLVM_TARGETS_TO_BUILD="$TARGET_ARCH" \
+          -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-android" \
           -S ../llvm-project/llvm \
-          -B .
+          -B . \
+          -G "Ninja"
 
-    - name: Build OLLVM
+    - name: Build clang
       run: |
         cd build
-        cmake --build . --parallel $(nproc)
+        ninja clang clang++ lld -j$(nproc)
 
-    - name: Install to Android NDK
+    - name: Test the build
       run: |
-        cd build
-        cmake --install . --prefix $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/
-        
-        # Copy Android libs for OLLVM
-        mkdir -p $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/$OLLVM_VERSION
-        cp -r $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/$ANDLLVM/lib \
-              $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/lib/clang/$OLLVM_VERSION/
-
-    - name: Test OLLVM installation
-      run: |
-        export PATH=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+        export PATH=$PWD/build/bin:$PATH
         clang --version
-        echo "OLLVM installation complete"
-        
-        # Test with a simple C file
         echo "int main() { return 0; }" > test.c
-        clang -mllvm -fla -mllvm -sub -target aarch64-linux-android21 test.c -o test.o
-        echo "OLLVM compilation test completed"
+        clang -target aarch64-linux-android21 test.c -c -o test.o && echo "✅ Build works"
 
-    - name: Archive build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ollvm-arm64-build
-        path: |
-          ${{ env.ANDROID_NDK }}/toolchains/llvm/prebuilt/linux-x86_64/
-        retention-days: 7
-
-    - name: Create tarball of built toolchain
+    - name: Create toolchain tarball
       run: |
-        cd $ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64
-        tar -czf ollvm-arm64-toolchain.tar.gz .
-        echo "TARBALL_PATH=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/ollvm-arm64-toolchain.tar.gz" >> $GITHUB_ENV
+        mkdir -p toolchain/bin
+        cp build/bin/clang toolchain/bin/
+        cp build/bin/clang++ toolchain/bin/
+        cp build/bin/lld toolchain/bin/
+        tar -czf ollvm-clang-arm64.tar.gz toolchain/
 
-    - name: Upload tarball as artifact
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: ollvm-arm64-toolchain
-        path: ${{ env.TARBALL_PATH }}
-        retention-days: 30
+        name: ollvm-clang-arm64
+        path: ollvm-clang-arm64.tar.gz
