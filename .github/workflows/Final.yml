@@ -1,4 +1,4 @@
-name: Build Android ARM64 Cross-Compiler with OLLVM
+name: Build Android ARM64 Cross-Compiler with OLLVM done
 
 on:
   workflow_dispatch:
