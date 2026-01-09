@@ -74,66 +74,34 @@ jobs:
         export CC=/usr/bin/clang-14
         export CXX=/usr/bin/clang++-14
         
-        # Create OLLVM configuration file
-        cat > ollvm_config.cmake << 'EOF'
-        # Enable ALL OLLVM obfuscation passes
-        set(LLVM_OBFUSCATE_FLATTEN ON CACHE BOOL "Enable control flow flattening" FORCE)
-        set(LLVM_OBFUSCATE_SUBSTITUTE ON CACHE BOOL "Enable instruction substitution" FORCE)
-        set(LLVM_OBFUSCATE_BOGUSCF ON CACHE BOOL "Enable bogus control flow" FORCE)
-        set(LLVM_OBFUSCATE_SPLIT ON CACHE BOOL "Enable basic block splitting" FORCE)
-        set(LLVM_OBFUSCATE_STRING ON CACHE BOOL "Enable string obfuscation" FORCE)
-        set(LLVM_OBFUSCATE_FUNCTIONS ON CACHE BOOL "Enable function annotations" FORCE)
-        set(LLVM_OBFUSCATE_INDIRECT ON CACHE BOOL "Enable indirect branching" FORCE)
-        EOF
-        
-        # FIXED: Correct CMake command without broken -C option
+        # FIXED: Proper YAML multiline command
         cmake ../llvm-project/llvm \
           -DCMAKE_BUILD_TYPE=Release \
           -DLLVM_ENABLE_PROJECTS="clang;lld" \
-          
-          # OLLVM-specific configuration
           -DOBFUSCATOR_BUILD=ON \
           -DLLVM_OBFUSCATOR_ENABLE=ON \
-          
-          # Host compiler with LLD support
           -DCMAKE_C_COMPILER=/usr/bin/clang-14 \
           -DCMAKE_CXX_COMPILER=/usr/bin/clang++-14 \
-          
-          # LLD configuration
           -DLLVM_ENABLE_LLD=ON \
           -DLLVM_USE_LINKER=lld \
           -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" \
           -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld" \
           -DCMAKE_MODULE_LINKER_FLAGS="-fuse-ld=lld" \
-          
-          # Host config
           -DCMAKE_HOST_SYSTEM_NAME="Linux" \
           -DCMAKE_HOST_SYSTEM_PROCESSOR="x86_64" \
           -DLLVM_HOST_TRIPLE="x86_64-unknown-linux-gnu" \
-          
-          # Target config - ANDROID API 29
           -DCMAKE_SYSTEM_NAME="Android" \
           -DCMAKE_SYSTEM_PROCESSOR="aarch64" \
           -DCMAKE_SYSTEM_VERSION="29" \
-          
-          # Target triple for Android 10 API 29
           -DLLVM_TARGETS_TO_BUILD="AArch64" \
           -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-android29" \
-          
-          # Android sysroot and flags
           -DCMAKE_SYSROOT="$SYSROOT" \
           -DCMAKE_C_FLAGS="--target=aarch64-linux-android29 --sysroot=$SYSROOT" \
           -DCMAKE_CXX_FLAGS="--target=aarch64-linux-android29 --sysroot=$SYSROOT" \
-          
-          # Toolchain from Android NDK
           -DCMAKE_AR="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" \
           -DCMAKE_RANLIB="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib" \
           -DCMAKE_STRIP="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
-          
-          # Clang defaults with OLLVM
           -DCLANG_DEFAULT_LINKER="lld" \
-          
-          # OLLVM build flags
           -DLLVM_OBFUSCATE_FLATTEN=ON \
           -DLLVM_OBFUSCATE_SUBSTITUTE=ON \
           -DLLVM_OBFUSCATE_BOGUSCF=ON \
@@ -141,14 +109,11 @@ jobs:
           -DLLVM_OBFUSCATE_STRING=ON \
           -DLLVM_OBFUSCATE_FUNCTIONS=ON \
           -DLLVM_OBFUSCATE_INDIRECT=ON \
-          
-          # Build settings
           -DLLVM_ENABLE_RUNTIMES="" \
           -DLLVM_INCLUDE_TESTS=OFF \
           -DLLVM_INCLUDE_EXAMPLES=OFF \
           -DLLVM_BUILD_TOOLS=ON \
           -DLLVM_ENABLE_ASSERTIONS=ON \
-          
           -G "Ninja"
         
         echo "✅ Configured for Android API 29 with ALL OLLVM obfuscations"
