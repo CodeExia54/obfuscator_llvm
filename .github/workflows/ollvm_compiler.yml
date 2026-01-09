@@ -1,4 +1,4 @@
-name: Build Android OLLVM Compiler ARM64
+name: Build Android OLLVM Compiler
 
 on:
   workflow_dispatch:
