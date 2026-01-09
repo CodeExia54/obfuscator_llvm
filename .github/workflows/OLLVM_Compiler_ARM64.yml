@@ -1,0 +1,270 @@
+name: Build Android OLLVM Compiler ARM64
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_lld:
+        description: 'Build LLD (linker)'
+        type: boolean
+        default: true
+      build_ar:
+        description: 'Build llvm-ar (archiver)'
+        type: boolean
+        default: true
+      build_nm:
+        description: 'Build llvm-nm (symbol lister)'
+        type: boolean
+        default: true
+      build_strip:
+        description: 'Build llvm-strip (binary stripper)'
+        type: boolean
+        default: true
+      build_objcopy:
+        description: 'Build llvm-objcopy (object copier)'
+        type: boolean
+        default: true
+      build_objdump:
+        description: 'Build llvm-objdump (disassembler)'
+        type: boolean
+        default: true
+      build_readelf:
+        description: 'Build llvm-readelf (ELF analyzer)'
+        type: boolean
+        default: true
+      build_ranlib:
+        description: 'Build llvm-ranlib (archive indexer)'
+        type: boolean
+        default: true
+      strip_binaries:
+        description: 'Strip binaries after build'
+        type: boolean
+        default: true
+
+jobs:
+  build-android-ollvm:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Checkout OLLVM
+      uses: actions/checkout@v4
+      with:
+        repository: sr-tream/obfuscator
+        ref: release/14.x
+        submodules: recursive
+
+    - name: Apply OLLVM patch
+      run: |
+        cd llvm-project
+        echo "Applying OLLVM patch..."
+        if git apply --check ../obfuscator.patch; then
+          git apply --whitespace=nowarn ../obfuscator.patch
+          echo "✅ OLLVM patches applied"
+        else
+          echo "⚠️ Patch doesn't apply cleanly, trying with rejections..."
+          git apply --whitespace=nowarn ../obfuscator.patch --reject || true
+          echo "Applied with possible rejections"
+        fi
+
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          build-essential \
+          cmake \
+          ninja-build \
+          git \
+          python3 \
+          python3-pip \
+          clang \
+          gcc-aarch64-linux-gnu \
+          g++-aarch64-linux-gnu \
+          libc6-dev-i386 \
+          zlib1g-dev \
+          binutils
+        
+        pip3 install pygments pyyaml
+        sudo ln -s /usr/bin/python3 /usr/bin/python 2>/dev/null || true
+
+    - name: Build OLLVM for Android ARM64
+      run: |
+        mkdir -p build
+        cd build
+        
+        echo "=== Building OLLVM for Android ARM64 ==="
+        echo "Using host compiler: $(clang --version | head -1)"
+        
+        # Build configuration
+        LLVM_PROJECTS="clang"
+        
+        # Add LLD if requested
+        if [ "${{ github.event.inputs.build_lld }}" = "true" ]; then
+          LLVM_PROJECTS="$LLVM_PROJECTS;lld"
+        fi
+        
+        # Add other tools if requested
+        declare -A tool_to_project=(
+          ["ar"]="llvm-ar"
+          ["nm"]="llvm-nm"
+          ["strip"]="llvm-strip"
+          ["objcopy"]="llvm-objcopy"
+          ["objdump"]="llvm-objdump"
+          ["readelf"]="llvm-readelf"
+          ["ranlib"]="llvm-ranlib"
+        )
+        
+        for tool in "${!tool_to_project[@]}"; do
+          if [ "${{ github.event.inputs.build_$tool }}" = "true" ]; then
+            LLVM_PROJECTS="$LLVM_PROJECTS;${tool_to_project[$tool]}"
+          fi
+        done
+        
+        echo "Building projects: $LLVM_PROJECTS"
+        
+        cmake ../llvm-project/llvm \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLVM_ENABLE_PROJECTS="$LLVM_PROJECTS" \
+          -DLLVM_TARGETS_TO_BUILD="AArch64;X86" \
+          -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-unknown-linux-android" \
+          -DLLVM_ENABLE_LLD=ON \
+          -DLLVM_ENABLE_ASSERTIONS=OFF \
+          -DLLVM_INCLUDE_TESTS=OFF \
+          -DLLVM_INCLUDE_EXAMPLES=OFF \
+          -DLLVM_BUILD_TOOLS=ON \
+          -DCMAKE_C_COMPILER=clang \
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_ASM_COMPILER=clang \
+          -G "Ninja"
+        
+        echo "Building OLLVM..."
+        ninja -j$(nproc)
+        
+        echo ""
+        echo "=== Build Summary ==="
+        echo "Built binaries:"
+        ls -la bin/
+
+    - name: Strip binaries (optional)
+      if: ${{ github.event.inputs.strip_binaries == 'true' }}
+      run: |
+        echo "=== Stripping binaries ==="
+        cd build/bin
+        
+        # List of binaries to strip
+        BINARIES_TO_STRIP=("clang" "clang++")
+        
+        # Add LLD if built
+        if [ "${{ github.event.inputs.build_lld }}" = "true" ]; then
+          BINARIES_TO_STRIP+=("lld" "ld.lld")
+        fi
+        
+        # Add other tools if built
+        declare -A tool_binaries=(
+          ["ar"]="llvm-ar"
+          ["nm"]="llvm-nm"
+          ["strip"]="llvm-strip"
+          ["objcopy"]="llvm-objcopy"
+          ["objdump"]="llvm-objdump"
+          ["readelf"]="llvm-readelf"
+          ["ranlib"]="llvm-ranlib"
+        )
+        
+        for tool in "${!tool_binaries[@]}"; do
+          if [ "${{ github.event.inputs.build_$tool }}" = "true" ]; then
+            BINARIES_TO_STRIP+=("${tool_binaries[$tool]}")
+          fi
+        done
+        
+        # Strip each binary
+        for binary in "${BINARIES_TO_STRIP[@]}"; do
+          if [ -f "$binary" ]; then
+            echo "Stripping $binary..."
+            original_size=$(stat -c%s "$binary")
+            strip --strip-all "$binary" 2>/dev/null || true
+            stripped_size=$(stat -c%s "$binary")
+            reduction=$((original_size - stripped_size))
+            echo "  Reduced by: $((reduction * 100 / original_size))% ($reduction bytes)"
+          fi
+        done
+
+    - name: Create standalone compiler package
+      run: |
+        mkdir -p android-ollvm-arm64
+        mkdir -p android-ollvm-arm64/bin
+        mkdir -p android-ollvm-arm64/lib
+        
+        echo "=== Creating Android OLLVM ARM64 Package ==="
+        
+        # Always copy clang
+        echo "Copying Clang compiler..."
+        cp -L build/bin/clang android-ollvm-arm64/bin/
+        cp -L build/bin/clang++ android-ollvm-arm64/bin/
+        
+        # Copy LLD if built
+        if [ "${{ github.event.inputs.build_lld }}" = "true" ]; then
+          echo "Copying LLD linker..."
+          if [ -f "build/bin/lld" ]; then
+            cp -L build/bin/lld android-ollvm-arm64/bin/
+          fi
+          if [ -f "build/bin/ld.lld" ]; then
+            cp -L build/bin/ld.lld android-ollvm-arm64/bin/
+          fi
+        fi
+        
+        # Copy other tools if built
+        declare -A tool_files=(
+          ["ar"]="llvm-ar"
+          ["nm"]="llvm-nm"
+          ["strip"]="llvm-strip"
+          ["objcopy"]="llvm-objcopy"
+          ["objdump"]="llvm-objdump"
+          ["readelf"]="llvm-readelf"
+          ["ranlib"]="llvm-ranlib"
+        )
+        
+        for tool in "${!tool_files[@]}"; do
+          if [ "${{ github.event.inputs.build_$tool }}" = "true" ]; then
+            binary="${tool_files[$tool]}"
+            if [ -f "build/bin/$binary" ]; then
+              echo "Copying $binary..."
+              cp -L "build/bin/$binary" "android-ollvm-arm64/bin/$binary"
+            fi
+          fi
+        done
+        
+        # Copy Clang runtime if available
+        if [ -d "build/lib/clang" ]; then
+          CLANG_VER=$(ls build/lib/clang/ | head -1)
+          echo "Found Clang version: $CLANG_VER"
+          mkdir -p android-ollvm-arm64/lib/clang/$CLANG_VER
+          cp -r build/lib/clang/$CLANG_VER/include android-ollvm-arm64/lib/clang/$CLANG_VER/ 2>/dev/null || true
+        fi
+        
+        # Show package contents
+        echo ""
+        echo "=== Package Contents ==="
+        echo "Package directory: android-ollvm-arm64"
+        echo "Binary sizes:"
+        for binary in android-ollvm-arm64/bin/*; do
+          if [ -f "$binary" ]; then
+            size=$(stat -c%s "$binary" 2>/dev/null || echo "0")
+            printf "  %-20s %10d bytes\n" "$(basename "$binary")" "$size"
+          fi
+        done
+        
+        echo ""
+        echo "Total package size before compression:"
+        du -sh android-ollvm-arm64
+        
+        # Create archive
+        tar -czf android-ollvm-arm64.tar.gz android-ollvm-arm64/
+        
+        echo ""
+        echo "✅ Package created: android-ollvm-arm64.tar.gz"
+        echo "   Size: $(du -h android-ollvm-arm64.tar.gz | cut -f1)"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: android-ollvm-arm64-compiler
+        path: android-ollvm-arm64.tar.gz
+        retention-days: 7
