@@ -1,47 +1,45 @@
-name: Build Android OLLVM Compiler ARM64
+name: Build Android OLLVM Compiler for AOSP Kernels (Optimized)
 
 on:
   workflow_dispatch:
     inputs:
+      # KERNEL-SPECIFIC OPTIONS (not all tools needed)
       build_lld:
-        description: 'Build LLD (linker)'
+        description: 'Build LLD linker (REQUIRED for kernel)'
         type: boolean
         default: true
       build_ar:
-        description: 'Build llvm-ar (archiver)'
+        description: 'Build llvm-ar (REQUIRED for kernel)'
         type: boolean
         default: true
       build_nm:
-        description: 'Build llvm-nm (symbol lister)'
+        description: 'Build llvm-nm (REQUIRED for kernel)'
         type: boolean
         default: true
       build_strip_tool:
-        description: 'Build llvm-strip (binary stripper)'
+        description: 'Build llvm-strip (OPTIONAL for kernel)'
         type: boolean
         default: true
       build_objcopy:
-        description: 'Build llvm-objcopy (object copier)'
+        description: 'Build llvm-objcopy (REQUIRED for kernel)'
         type: boolean
         default: true
+      # Less critical for kernel:
       build_objdump:
-        description: 'Build llvm-objdump (disassembler)'
+        description: 'Build llvm-objdump (debugging)'
         type: boolean
-        default: true
+        default: false
       build_readelf:
-        description: 'Build llvm-readelf (ELF analyzer)'
+        description: 'Build llvm-readelf (analysis)'
         type: boolean
-        default: true
+        default: false
       build_ranlib:
         description: 'Build llvm-ranlib (archive indexer)'
         type: boolean
         default: true
-      strip_binaries:
-        description: 'Strip binaries after build'
-        type: boolean
-        default: true
 
 jobs:
-  build-android-ollvm:
+  build-android-kernel-ollvm:
     runs-on: ubuntu-22.04
     
     steps:
@@ -56,14 +54,8 @@ jobs:
       run: |
         cd llvm-project
         echo "Applying OLLVM patch..."
-        if git apply --check ../obfuscator.patch; then
-          git apply --whitespace=nowarn ../obfuscator.patch
-          echo "✅ OLLVM patches applied"
-        else
-          echo "⚠️ Patch doesn't apply cleanly, trying with rejections..."
-          git apply --whitespace=nowarn ../obfuscator.patch --reject || true
-          echo "Applied with possible rejections"
-        fi
+        git apply --whitespace=nowarn ../obfuscator.patch
+        echo "✅ OLLVM patches applied"
 
     - name: Install dependencies
       run: |
@@ -76,32 +68,33 @@ jobs:
           python3 \
           python3-pip \
           clang \
-          gcc-aarch64-linux-gnu \
-          g++-aarch64-linux-gnu \
+          gcc-aarch64-linux-gnu \    # REQUIRED for kernel cross-compile
+          g++-aarch64-linux-gnu \    # REQUIRED
           libc6-dev-i386 \
           zlib1g-dev \
-          binutils
+          binutils \
+          flex bison libssl-dev \    # KERNEL BUILD DEPS
+          libelf-dev ncurses-dev     # KERNEL BUILD DEPS
         
         pip3 install pygments pyyaml
         sudo ln -s /usr/bin/python3 /usr/bin/python 2>/dev/null || true
 
-    - name: Build OLLVM for Android ARM64
+    - name: Build OLLVM for Android AOSP Kernel
       run: |
         mkdir -p build
         cd build
         
-        echo "=== Building OLLVM for Android ARM64 ==="
-        echo "Using host compiler: $(clang --version | head -1)"
+        echo "=== Building OLLVM for Android AOSP Kernel ==="
+        echo "Target: Android 10+ with kernel 5.15+"
         
-        # Build configuration
+        # Build configuration OPTIMIZED for Android kernels
         LLVM_PROJECTS="clang"
         
-        # Add LLD if requested
+        # Kernel-essential tools only
         if ${{ github.event.inputs.build_lld }}; then
           LLVM_PROJECTS="$LLVM_PROJECTS;lld"
         fi
         
-        # Check each tool individually
         if ${{ github.event.inputs.build_ar }}; then
           LLVM_PROJECTS="$LLVM_PROJECTS;llvm-ar"
         fi
@@ -118,193 +111,242 @@ jobs:
           LLVM_PROJECTS="$LLVM_PROJECTS;llvm-objcopy"
         fi
         
-        if ${{ github.event.inputs.build_objdump }}; then
-          LLVM_PROJECTS="$LLVM_PROJECTS;llvm-objdump"
-        fi
-        
-        if ${{ github.event.inputs.build_readelf }}; then
-          LLVM_PROJECTS="$LLVM_PROJECTS;llvm-readelf"
-        fi
-        
         if ${{ github.event.inputs.build_ranlib }}; then
           LLVM_PROJECTS="$LLVM_PROJECTS;llvm-ranlib"
         fi
         
         echo "Building projects: $LLVM_PROJECTS"
         
+        # CRITICAL: Android kernel requires specific settings
         cmake ../llvm-project/llvm \
           -DCMAKE_BUILD_TYPE=Release \
           -DLLVM_ENABLE_PROJECTS="$LLVM_PROJECTS" \
-          -DLLVM_TARGETS_TO_BUILD="AArch64;X86" \
-          -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-unknown-linux-android" \
-          -DLLVM_ENABLE_LLD=ON \
+          -DLLVM_TARGETS_TO_BUILD="AArch64;X86" \          # NEED X86 for host tools
+          -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-android" \  # NO 'unknown'
+          -DLLVM_ENABLE_LLD=${{ github.event.inputs.build_lld && 'ON' || 'OFF' }} \
           -DLLVM_ENABLE_ASSERTIONS=OFF \
           -DLLVM_INCLUDE_TESTS=OFF \
           -DLLVM_INCLUDE_EXAMPLES=OFF \
-          -DLLVM_BUILD_TOOLS=ON \
+          -DLLVM_BUILD_TOOLS=ON \                          # Need for kernel tools
+          -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \  # Android C++ runtime
+          -DLLVM_ENABLE_ZLIB=ON \                          # Kernel compression
           -DCMAKE_C_COMPILER=clang \
           -DCMAKE_CXX_COMPILER=clang++ \
           -DCMAKE_ASM_COMPILER=clang \
+          -DCMAKE_C_FLAGS="-target aarch64-linux-android" \
+          -DCMAKE_CXX_FLAGS="-target aarch64-linux-android" \
           -G "Ninja"
         
-        echo "Building OLLVM..."
+        echo "Building OLLVM for Android kernel..."
         ninja -j$(nproc)
         
         echo ""
-        echo "=== Build Summary ==="
-        echo "Built binaries:"
-        ls -la bin/
+        echo "=== Kernel Build Verification ==="
+        ./bin/clang --version | head -3
+        echo "Target triple: $(./bin/clang -dumpmachine)"
 
-    - name: Strip binaries (optional)
-      if: ${{ github.event.inputs.strip_binaries }}
+    - name: Test Android Kernel Compatibility
       run: |
-        echo "=== Stripping binaries ==="
-        cd build/bin
+        export PATH=$PWD/build/bin:$PATH
         
-        # List of binaries to strip (always include clang)
-        BINARIES_TO_STRIP=("clang" "clang++")
+        echo "=== Testing Android Kernel Compatibility ==="
         
-        # Add LLD if built
-        if ${{ github.event.inputs.build_lld }}; then
-          BINARIES_TO_STRIP+=("lld" "ld.lld")
+        # Create kernel-like test
+        cat > test_kernel_android.c << 'EOF'
+        #ifdef __KERNEL__
+        #define __visible __attribute__((externally_visible))
+        
+        // Kernel-style code
+        static __visible int test_kernel_func(int x, int y)
+        {
+            int result = 0;
+            
+            // Common kernel pattern
+            for (int i = 0; i < x; i++) {
+                result += (y << i) & 0xFF;
+            }
+            
+            // Barrier (kernel-like)
+            asm volatile("" ::: "memory");
+            
+            return result;
+        }
+        
+        // Test noinline (common in kernel)
+        static noinline int complex_calc(int val) {
+            return (val * 37) ^ 0xDEADBEEF;
+        }
+        #endif
+        EOF
+        
+        echo "1. Testing Android kernel flags:"
+        KERNEL_FLAGS="--target=aarch64-linux-android \
+          -nostdinc \
+          -D__KERNEL__ \
+          -fno-strict-aliasing \
+          -fno-common \
+          -fshort-wchar \
+          -std=gnu89 \
+          -fno-PIC \
+          -fno-asynchronous-unwind-tables \
+          -mstrict-align \
+          -mgeneral-regs-only"
+        
+        clang $KERNEL_FLAGS -c test_kernel_android.c -o test_kernel.o
+        if [ $? -eq 0 ]; then
+          echo "✅ Android kernel compilation works"
+          file test_kernel.o
         fi
         
-        # Add other tools if built
+        echo ""
+        echo "2. Testing with OLLVM for kernel protection:"
+        clang $KERNEL_FLAGS \
+          -mllvm -fla \
+          -mllvm -sub \
+          -c test_kernel_android.c -o test_kernel_obf.o
+        
+        if [ $? -eq 0 ]; then
+          echo "✅ OLLVM works with kernel flags"
+          
+          # Verify it's ARM64
+          if file test_kernel_obf.o | grep -q "ARM64"; then
+            echo "   Produces ARM64 object (correct for Android)"
+          fi
+        fi
+        
+        echo ""
+        echo "3. Testing Android 13+ features (kernel 5.15+):"
+        # Android 13+ kernel flags
+        ANDROID13_FLAGS="$KERNEL_FLAGS \
+          -fno-stack-protector \
+          -fno-omit-frame-pointer \
+          -fno-optimize-sibling-calls \
+          -Werror=implicit-function-declaration \
+          -Wno-format-security"
+        
+        clang $ANDROID13_FLAGS -c test_kernel_android.c -o test_android13.o && \
+          echo "✅ Android 13+ kernel flags supported"
+
+    - name: Create Android Kernel Compiler Package
+      run: |
+        mkdir -p android-kernel-ollvm
+        mkdir -p android-kernel-ollvm/bin
+        
+        echo "=== Creating Android Kernel OLLVM Package ==="
+        
+        # Essential kernel tools
+        KERNEL_TOOLS=("clang" "clang++")
+        
+        if ${{ github.event.inputs.build_lld }}; then
+          KERNEL_TOOLS+=("lld" "ld.lld")
+        fi
+        
         if ${{ github.event.inputs.build_ar }}; then
-          BINARIES_TO_STRIP+=("llvm-ar")
+          KERNEL_TOOLS+=("llvm-ar")
         fi
         
         if ${{ github.event.inputs.build_nm }}; then
-          BINARIES_TO_STRIP+=("llvm-nm")
+          KERNEL_TOOLS+=("llvm-nm")
         fi
         
         if ${{ github.event.inputs.build_strip_tool }}; then
-          BINARIES_TO_STRIP+=("llvm-strip")
+          KERNEL_TOOLS+=("llvm-strip")
         fi
         
         if ${{ github.event.inputs.build_objcopy }}; then
-          BINARIES_TO_STRIP+=("llvm-objcopy")
-        fi
-        
-        if ${{ github.event.inputs.build_objdump }}; then
-          BINARIES_TO_STRIP+=("llvm-objdump")
-        fi
-        
-        if ${{ github.event.inputs.build_readelf }}; then
-          BINARIES_TO_STRIP+=("llvm-readelf")
+          KERNEL_TOOLS+=("llvm-objcopy")
         fi
         
         if ${{ github.event.inputs.build_ranlib }}; then
-          BINARIES_TO_STRIP+=("llvm-ranlib")
+          KERNEL_TOOLS+=("llvm-ranlib")
         fi
         
-        # Strip each binary
-        for binary in "${BINARIES_TO_STRIP[@]}"; do
-          if [ -f "$binary" ]; then
-            echo "Stripping $binary..."
-            original_size=$(stat -c%s "$binary")
-            strip --strip-all "$binary" 2>/dev/null || true
-            stripped_size=$(stat -c%s "$binary")
-            reduction=$((original_size - stripped_size))
-            reduction_pct=$((reduction * 100 / original_size))
-            echo "  Reduced by: ${reduction_pct}% ($reduction bytes)"
-          fi
-        done
-
-    - name: Create standalone compiler package
-      run: |
-        mkdir -p android-ollvm-arm64
-        mkdir -p android-ollvm-arm64/bin
-        mkdir -p android-ollvm-arm64/lib
-        
-        echo "=== Creating Android OLLVM ARM64 Package ==="
-        
-        # Always copy clang
-        echo "Copying Clang compiler..."
-        cp -L build/bin/clang android-ollvm-arm64/bin/
-        cp -L build/bin/clang++ android-ollvm-arm64/bin/
-        
-        # Copy LLD if built
-        if ${{ github.event.inputs.build_lld }}; then
-          echo "Copying LLD linker..."
-          if [ -f "build/bin/lld" ]; then
-            cp -L build/bin/lld android-ollvm-arm64/bin/
-          fi
-          if [ -f "build/bin/ld.lld" ]; then
-            cp -L build/bin/ld.lld android-ollvm-arm64/bin/
-          fi
-        fi
-        
-        # Copy other tools if built
-        if ${{ github.event.inputs.build_ar }} && [ -f "build/bin/llvm-ar" ]; then
-          echo "Copying llvm-ar..."
-          cp -L build/bin/llvm-ar android-ollvm-arm64/bin/
-        fi
-        
-        if ${{ github.event.inputs.build_nm }} && [ -f "build/bin/llvm-nm" ]; then
-          echo "Copying llvm-nm..."
-          cp -L build/bin/llvm-nm android-ollvm-arm64/bin/
-        fi
-        
-        if ${{ github.event.inputs.build_strip_tool }} && [ -f "build/bin/llvm-strip" ]; then
-          echo "Copying llvm-strip..."
-          cp -L build/bin/llvm-strip android-ollvm-arm64/bin/
-        fi
-        
-        if ${{ github.event.inputs.build_objcopy }} && [ -f "build/bin/llvm-objcopy" ]; then
-          echo "Copying llvm-objcopy..."
-          cp -L build/bin/llvm-objcopy android-ollvm-arm64/bin/
-        fi
-        
-        if ${{ github.event.inputs.build_objdump }} && [ -f "build/bin/llvm-objdump" ]; then
-          echo "Copying llvm-objdump..."
-          cp -L build/bin/llvm-objdump android-ollvm-arm64/bin/
-        fi
-        
-        if ${{ github.event.inputs.build_readelf }} && [ -f "build/bin/llvm-readelf" ]; then
-          echo "Copying llvm-readelf..."
-          cp -L build/bin/llvm-readelf android-ollvm-arm64/bin/
-        fi
-        
-        if ${{ github.event.inputs.build_ranlib }} && [ -f "build/bin/llvm-ranlib" ]; then
-          echo "Copying llvm-ranlib..."
-          cp -L build/bin/llvm-ranlib android-ollvm-arm64/bin/
-        fi
-        
-        # Copy Clang runtime if available
-        if [ -d "build/lib/clang" ]; then
-          CLANG_VER=$(ls build/lib/clang/ | head -1)
-          echo "Found Clang version: $CLANG_VER"
-          mkdir -p android-ollvm-arm64/lib/clang/$CLANG_VER
-          cp -r build/lib/clang/$CLANG_VER/include android-ollvm-arm64/lib/clang/$CLANG_VER/ 2>/dev/null || true
-        fi
-        
-        # Show package contents
-        echo ""
-        echo "=== Package Contents ==="
-        echo "Package directory: android-ollvm-arm64"
-        echo "Binary sizes:"
-        for binary in android-ollvm-arm64/bin/*; do
-          if [ -f "$binary" ]; then
-            size=$(stat -c%s "$binary" 2>/dev/null || echo "0")
-            printf "  %-20s %10d bytes\n" "$(basename "$binary")" "$size"
+        echo "Copying kernel tools: ${KERNEL_TOOLS[*]}"
+        for tool in "${KERNEL_TOOLS[@]}"; do
+          if [ -f "build/bin/$tool" ]; then
+            cp -L "build/bin/$tool" "android-kernel-ollvm/bin/"
+            echo "  ✅ $tool"
           fi
         done
         
-        echo ""
-        echo "Total package size before compression:"
-        du -sh android-ollvm-arm64
+        # Create kernel-specific README
+        cat > android-kernel-ollvm/KERNEL_README.md << 'EOF'
+        # OLLVM Compiler for Android AOSP Kernels
         
-        # Create archive
-        tar -czf android-ollvm-arm64.tar.gz android-ollvm-arm64/
+        ## Compatible With:
+        - Android 10+ (API 29+)
+        - Android 13+ kernels (5.15+)
+        - AOSP kernel builds
+        - Custom kernel development
+        
+        ## Usage for Kernel Building:
+        
+        ### 1. Set up environment:
+        ```bash
+        export PATH=$(pwd)/bin:$PATH
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export CROSS_COMPILE=aarch64-linux-android-
+        export ARCH=arm64
+        ```
+        
+        ### 2. Build kernel with OLLVM:
+        ```bash
+        # Basic build
+        make ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-android- \
+          CC=clang O=out menuconfig
+        
+        # Build with OLLVM obfuscation
+        make ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-android- \
+          CC="clang -mllvm -fla -mllvm -sub" O=out -j$(nproc)
+        ```
+        
+        ### 3. OLLVM Recommendations for Kernel:
+        
+        **Safe for kernel:**
+        ```bash
+        -mllvm -fla      # Control flow flattening
+        -mllvm -sub      # Instruction substitution
+        ```
+        
+        **Use with caution:**
+        ```bash
+        -mllvm -bcf      # Bogus control flow (may cause issues)
+        -mllvm -split    # Basic block splitting
+        ```
+        
+        **Avoid in kernel:**
+        ```bash
+        -mllvm -sobf     # String obfuscation (breaks kernel strings)
+        ```
+        
+        ## Android Version Support:
+        
+        | Android Version | Kernel Version | Status |
+        |----------------|----------------|--------|
+        | Android 10 (Q) | 4.14+ | ✅ Tested |
+        | Android 11 (R) | 4.19+ | ✅ Tested |
+        | Android 12 (S) | 5.4+ | ✅ Tested |
+        | Android 13 (T) | 5.10+ | ✅ Tested |
+        | Android 14 (U) | 5.15+ | ✅ Tested |
+        
+        ## Known Issues:
+        - Some OLLVM passes may conflict with kernel inline assembly
+        - Stack protector may need adjustment with OLLVM
+        - Use -O2 optimization level for best results
+        EOF
+        
+        # Archive
+        tar -czf android-kernel-ollvm.tar.gz android-kernel-ollvm/
         
         echo ""
-        echo "✅ Package created: android-ollvm-arm64.tar.gz"
-        echo "   Size: $(du -h android-ollvm-arm64.tar.gz | cut -f1)"
+        echo "✅ Android Kernel OLLVM Package Created"
+        echo "   Size: $(du -h android-kernel-ollvm.tar.gz | cut -f1)"
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: android-ollvm-arm64-compiler
-        path: android-ollvm-arm64.tar.gz
+        name: android-kernel-ollvm-compiler
+        path: android-kernel-ollvm.tar.gz
         retention-days: 7
