@@ -1,4 +1,4 @@
-name: Build Android ARM64 Cross-Compiler with OLLVM done
+name: Build Android API 29 Cross-Compiler with FULL OLLVM Obfuscation
 
 on:
   workflow_dispatch:
@@ -17,13 +17,43 @@ jobs:
         ref: release/14.x
         submodules: recursive
 
-    - name: Apply OLLVM patch
+    - name: Apply OLLVM patch AND enable all obfuscations
       run: |
         cd llvm-project
         git apply --whitespace=nowarn ../obfuscator.patch
         echo "✅ OLLVM obfuscation patches applied"
+        
+        # CRITICAL: Enable ALL OLLVM passes in the build configuration
+        # Create custom configuration to enable all obfuscations
+        cat > ../enable_all_ollvm.cmake << 'EOF'
+        # Enable ALL OLLVM obfuscation passes
+        
+        # Control Flow Flattening (FLA)
+        set(LLVM_OBFUSCATE_FLATTEN ON CACHE BOOL "Enable control flow flattening" FORCE)
+        
+        # Instruction Substitution (SUB)
+        set(LLVM_OBFUSCATE_SUBSTITUTE ON CACHE BOOL "Enable instruction substitution" FORCE)
+        
+        # Bogus Control Flow (BCF)
+        set(LLVM_OBFUSCATE_BOGUSCF ON CACHE BOOL "Enable bogus control flow" FORCE)
+        
+        # Basic Block Splitting
+        set(LLVM_OBFUSCATE_SPLIT ON CACHE BOOL "Enable basic block splitting" FORCE)
+        
+        # String Obfuscation
+        set(LLVM_OBFUSCATE_STRING ON CACHE BOOL "Enable string obfuscation" FORCE)
+        
+        # Functions annotations
+        set(LLVM_OBFUSCATE_FUNCTIONS ON CACHE BOOL "Enable function annotations" FORCE)
+        
+        # Indirect branching
+        set(LLVM_OBFUSCATE_INDIRECT ON CACHE BOOL "Enable indirect branching" FORCE)
+        
+        # Enable all transformations by default
+        set(DEFAULT_OBFUSCATION_FLAGS "-mllvm -fla -mllvm -sub -mllvm -bcf -mllvm -split -mllvm -sobf" CACHE STRING "Default OLLVM flags" FORCE)
+        EOF
 
-    - name: Install build tools
+    - name: Install build tools with LLD
       run: |
         sudo apt update
         sudo apt install -y \
@@ -32,159 +62,524 @@ jobs:
           ninja-build \
           git \
           python3 \
+          python3-yaml \
+          python3-pip \
+          lld \
           clang \
-          lld
+          gcc-aarch64-linux-gnu \
+          g++-aarch64-linux-gnu
+        
+        # Install LLVM 14 toolchain
+        wget https://apt.llvm.org/llvm.sh
+        chmod +x llvm.sh
+        sudo ./llvm.sh 14
+        sudo apt install -y clang-14 lld-14 llvm-14-tools
+        
+        # Set clang-14 as default
+        sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
+        sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100
+        sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-14 100
 
-    - name: Download Android NDK (for sysroot)
+    - name: Setup Python
       run: |
-        wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+        pip3 install pygments pyyaml
+        sudo ln -s /usr/bin/python3 /usr/bin/python 2>/dev/null || true
+
+    - name: Download Android NDK
+      run: |
+        wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
         unzip -q android-ndk-r25c-linux.zip
         export ANDROID_NDK=$PWD/android-ndk-r25c
         echo "ANDROID_NDK=$ANDROID_NDK" >> $GITHUB_ENV
+        echo "NDK_HOME=$ANDROID_NDK" >> $GITHUB_ENV
 
-    - name: Configure Android ARM64 cross-compiler PROPERLY
+    - name: Configure for Android API 29 with ALL OLLVM passes
       run: |
         mkdir -p build
         cd build
         
-        # Get Android sysroot path
         SYSROOT="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
         
-        # Build clang as a cross-compiler for Android
+        # Use clang-14 as host compiler
+        export CC=/usr/bin/clang-14
+        export CXX=/usr/bin/clang++-14
+        
+        # First apply OLLVM configuration
+        cp ../enable_all_ollvm.cmake .
+        
         cmake ../llvm-project/llvm \
           -DCMAKE_BUILD_TYPE=Release \
-          -DLLVM_ENABLE_PROJECTS="clang" \
+          -DLLVM_ENABLE_PROJECTS="clang;lld" \
           
-          # Host: where clang runs (x86_64 Linux)
+          # Apply OLLVM configuration FIRST
+          -C enable_all_ollvm.cmake \
+          
+          # OLLVM-specific configuration
+          -DOBFUSCATOR_BUILD=ON \
+          -DLLVM_OBFUSCATOR_ENABLE=ON \
+          
+          # Host compiler with LLD support
+          -DCMAKE_C_COMPILER=/usr/bin/clang-14 \
+          -DCMAKE_CXX_COMPILER=/usr/bin/clang++-14 \
+          
+          # LLD configuration
+          -DLLVM_ENABLE_LLD=ON \
+          -DLLVM_USE_LINKER=lld \
+          -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" \
+          -DCMAKE_SHARED_LINKER_FLAGS="-fuse-ld=lld" \
+          -DCMAKE_MODULE_LINKER_FLAGS="-fuse-ld=lld" \
+          
+          # Host config
           -DCMAKE_HOST_SYSTEM_NAME="Linux" \
           -DCMAKE_HOST_SYSTEM_PROCESSOR="x86_64" \
+          -DLLVM_HOST_TRIPLE="x86_64-unknown-linux-gnu" \
           
-          # Target: Android ARM64
+          # Target config - ANDROID API 29
           -DCMAKE_SYSTEM_NAME="Android" \
           -DCMAKE_SYSTEM_PROCESSOR="aarch64" \
-          -DCMAKE_SYSTEM_VERSION="21" \
+          -DCMAKE_SYSTEM_VERSION="29" \
           
-          # Android target specifications
+          # Target triple for Android 10 API 29
           -DLLVM_TARGETS_TO_BUILD="AArch64" \
-          -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-android" \
+          -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-android29" \
           
-          # Android sysroot (CRITICAL!)
+          # Android sysroot and flags
           -DCMAKE_SYSROOT="$SYSROOT" \
-          -DCMAKE_FIND_ROOT_PATH="$SYSROOT" \
-          -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM="NEVER" \
-          -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY="ONLY" \
-          -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE="ONLY" \
-          -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE="ONLY" \
+          -DCMAKE_C_FLAGS="--target=aarch64-linux-android29 --sysroot=$SYSROOT" \
+          -DCMAKE_CXX_FLAGS="--target=aarch64-linux-android29 --sysroot=$SYSROOT" \
           
-          # Cross-compilation flags
-          -DCMAKE_C_FLAGS="--target=aarch64-linux-android21 --sysroot=$SYSROOT" \
-          -DCMAKE_CXX_FLAGS="--target=aarch64-linux-android21 --sysroot=$SYSROOT" \
+          # Toolchain from Android NDK
+          -DCMAKE_AR="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" \
+          -DCMAKE_RANLIB="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib" \
+          -DCMAKE_STRIP="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
           
-          # Minimal build
+          # Clang defaults with OLLVM
+          -DCLANG_DEFAULT_LINKER="lld" \
+          -DCLANG_DEFAULT_OBFUSCATION="-mllvm -fla -mllvm -sub -mllvm -bcf -mllvm -split -mllvm -sobf" \
+          
+          # Build ALL OLLVM passes
+          -DLLVM_OBFUSCATE_FLATTEN=ON \
+          -DLLVM_OBFUSCATE_SUBSTITUTE=ON \
+          -DLLVM_OBFUSCATE_BOGUSCF=ON \
+          -DLLVM_OBFUSCATE_SPLIT=ON \
+          -DLLVM_OBFUSCATE_STRING=ON \
+          -DLLVM_OBFUSCATE_FUNCTIONS=ON \
+          -DLLVM_OBFUSCATE_INDIRECT=ON \
+          
+          # Build settings
           -DLLVM_ENABLE_RUNTIMES="" \
           -DLLVM_INCLUDE_TESTS=OFF \
           -DLLVM_INCLUDE_EXAMPLES=OFF \
-          -DLLVM_BUILD_TOOLS=OFF \
-          -DLLVM_ENABLE_LLD=OFF \
+          -DLLVM_BUILD_TOOLS=ON \
+          -DLLVM_ENABLE_ASSERTIONS=ON \
           
-          -G "Unix Makefiles"  # Use Make to avoid LLD issues
+          -G "Ninja"
         
-        echo "✅ Properly configured Android ARM64 cross-compiler"
+        echo "✅ Configured for Android API 29 with ALL OLLVM obfuscations"
 
-    - name: Build clang cross-compiler
+    - name: Build compiler with all OLLVM passes
       run: |
         cd build
-        make clang -j$(nproc)
-        echo "✅ Android ARM64 cross-compiler built"
+        ninja clang lld -j$(nproc)
+        echo "✅ Built clang with ALL OLLVM obfuscation passes"
 
-    - name: REAL Android compilation test
+    - name: Test ALL OLLVM obfuscation passes
       run: |
         export PATH=$PWD/build/bin:$PATH
         
-        echo "=== REAL Android ARM64 Test ==="
+        echo "=== Testing ALL OLLVM Obfuscation Passes ==="
         
-        # Create Android test program
-        cat > test_android.c << 'EOF'
+        # Create comprehensive test program
+        cat > test_ollvm_full.c << 'EOF'
         #include <stdio.h>
+        #include <string.h>
+        
+        const char* secret = "This is a secret string";
+        
+        int fibonacci(int n) {
+            if (n <= 1) return n;
+            return fibonacci(n-1) + fibonacci(n-2);
+        }
+        
+        void process_data(int* data, int size) {
+            for (int i = 0; i < size; i++) {
+                data[i] = data[i] * 2 + 1;
+            }
+        }
         
         int main() {
-            printf("Hello from Android ARM64!
-");
+            printf("Testing ALL OLLVM passes\n");
+            printf("Secret: %s\n", secret);
+            
+            int result = fibonacci(10);
+            printf("Fibonacci(10) = %d\n", result);
+            
+            int data[5] = {1, 2, 3, 4, 5};
+            process_data(data, 5);
+            
+            for (int i = 0; i < 5; i++) {
+                printf("Data[%d] = %d\n", i, data[i]);
+            }
+            
             return 0;
         }
         EOF
         
-        echo "1. Try to compile with Android sysroot:"
-        clang -target aarch64-linux-android21 \
+        echo "1. Testing Control Flow Flattening (-fla):"
+        clang -target aarch64-linux-android29 \
           --sysroot="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
-          -c test_android.c -o test_android.o
-        
-        if [ $? -eq 0 ] && [ -f "test_android.o" ]; then
-          echo "✅ Can compile Android ARM64 with sysroot"
-          file test_android.o
-        else
-          echo "⚠️  Might need Android libraries to link fully"
-          echo "But compilation to object file should work"
-        fi
+          -mllvm -fla \
+          -c test_ollvm_full.c -o test_fla.o && \
+        echo "✅ Control Flow Flattening works"
         
         echo ""
-        echo "2. Test OLLVM:"
-        clang -target aarch64-linux-android21 -mllvm -fla -c test_android.c -o test_ollvm.o && \
-        echo "✅ OLLVM passes work"
-
-    - name: Create package with instructions
-      run: |
-        mkdir -p android-arm64-ollvm
-        mkdir -p android-arm64-ollvm/bin
+        echo "2. Testing Instruction Substitution (-sub):"
+        clang -target aarch64-linux-android29 \
+          --sysroot="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
+          -mllvm -sub \
+          -c test_ollvm_full.c -o test_sub.o && \
+        echo "✅ Instruction Substitution works"
         
-        cp -L build/bin/clang android-arm64-ollvm/bin/
-        cp -L build/bin/clang++ android-arm64-ollvm/bin/
+        echo ""
+        echo "3. Testing Bogus Control Flow (-bcf):"
+        clang -target aarch64-linux-android29 \
+          --sysroot="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
+          -mllvm -bcf \
+          -c test_ollvm_full.c -o test_bcf.o && \
+        echo "✅ Bogus Control Flow works"
         
-        # Create REAL usage instructions
-        cat > android-arm64-ollvm/README.md << 'EOF'
-        # OLLVM Clang for Android ARM64
+        echo ""
+        echo "4. Testing Basic Block Splitting (-split):"
+        clang -target aarch64-linux-android29 \
+          --sysroot="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
+          -mllvm -split \
+          -c test_ollvm_full.c -o test_split.o && \
+        echo "✅ Basic Block Splitting works"
         
-        ## IMPORTANT: This is a CROSS-COMPILER
+        echo ""
+        echo "5. Testing String Obfuscation (-sobf):"
+        clang -target aarch64-linux-android29 \
+          --sysroot="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
+          -mllvm -sobf \
+          -c test_ollvm_full.c -o test_sobf.o && \
+        echo "✅ String Obfuscation works"
         
-        ### What it can do:
-        - ✅ Runs on x86_64 Linux
-        - ✅ Can compile C/C++ to Android ARM64 object files (.o)
-        - ✅ Has OLLVM obfuscation built-in
-        
-        ### What it NEEDS to link Android binaries:
-        - Android NDK sysroot (--sysroot=...)
-        - Android linker and libraries
-        
-        ## Usage with Android NDK:
-        
-        ```bash
-        # 1. Download Android NDK
-        # 2. Compile with Android sysroot:
-        ./bin/clang -target aarch64-linux-android21 \
-          --sysroot=/path/to/android-ndk/sysroot \
+        echo ""
+        echo "6. Testing ALL passes combined:"
+        clang -target aarch64-linux-android29 \
+          --sysroot="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
           -mllvm -fla \
           -mllvm -sub \
-          your_app.c \
-          -o your_app
+          -mllvm -bcf \
+          -mllvm -split \
+          -mllvm -sobf \
+          -c test_ollvm_full.c -o test_all.o && \
+        echo "✅ ALL OLLVM passes work together!"
+        
+        echo ""
+        echo "7. Testing with different optimization levels:"
+        for OPT in -O0 -O1 -O2 -O3 -Os; do
+          clang -target aarch64-linux-android29 \
+            --sysroot="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
+            $OPT \
+            -mllvm -fla -mllvm -sub \
+            -c test_ollvm_full.c -o "test_opt${OPT}.o" 2>/dev/null && \
+          echo "✅ Works with $OPT"
+        done
+
+    - name: Create package with ALL OLLVM obfuscations
+      run: |
+        mkdir -p android-api29-full-ollvm
+        mkdir -p android-api29-full-ollvm/bin
+        mkdir -p android-api29-full-ollvm/examples
+        
+        # Copy essential binaries
+        cp -L build/bin/clang android-api29-full-ollvm/bin/
+        cp -L build/bin/clang++ android-api29-full-ollvm/bin/
+        cp -L build/bin/ld.lld android-api29-full-ollvm/bin/ 2>/dev/null || true
+        
+        # Create OLLVM presets file
+        cat > android-api29-full-ollvm/ollvm_presets.sh << 'EOF'
+        #!/bin/bash
+        # OLLVM Obfuscation Presets for Android API 29
+        
+        # Light obfuscation (good balance)
+        OLLVM_LIGHT="-mllvm -fla -mllvm -sub"
+        
+        # Medium obfuscation (more protection)
+        OLLVM_MEDIUM="-mllvm -fla -mllvm -sub -mllvm -bcf"
+        
+        # Heavy obfuscation (maximum protection)
+        OLLVM_HEAVY="-mllvm -fla -mllvm -sub -mllvm -bcf -mllvm -split -mllvm -sobf"
+        
+        # String-only obfuscation
+        OLLVM_STRINGS="-mllvm -sobf"
+        
+        # Control flow only
+        OLLVM_CONTROL="-mllvm -fla -mllvm -bcf"
+        
+        # Instruction only
+        OLLVM_INSTRUCTIONS="-mllvm -sub"
+        
+        # Compile with preset
+        compile_ollvm() {
+            local preset="$1"
+            local api="${2:-29}"
+            local infile="$3"
+            local outfile="$4"
+            shift 4
+            
+            case $preset in
+                light) local flags="$OLLVM_LIGHT" ;;
+                medium) local flags="$OLLVM_MEDIUM" ;;
+                heavy) local flags="$OLLVM_HEAVY" ;;
+                strings) local flags="$OLLVM_STRINGS" ;;
+                control) local flags="$OLLVM_CONTROL" ;;
+                instructions) local flags="$OLLVM_INSTRUCTIONS" ;;
+                *) local flags="$preset" ;;
+            esac
+            
+            clang -target "aarch64-linux-android$api" \
+              --sysroot="$SYSROOT" \
+              $flags \
+              "$@" \
+              "$infile" -o "$outfile"
+        }
+        
+        # Quick compile functions
+        ollvm_light() { compile_ollvm light "$@"; }
+        ollvm_medium() { compile_ollvm medium "$@"; }
+        ollvm_heavy() { compile_ollvm heavy "$@"; }
+        
+        echo "OLLVM presets loaded. Available presets:"
+        echo "  ollvm_light    - Control flow flattening + instruction substitution"
+        echo "  ollvm_medium   - Light + bogus control flow"
+        echo "  ollvm_heavy    - All obfuscations (max protection)"
+        EOF
+        
+        # Create example with all obfuscations
+        cat > android-api29-full-ollvm/examples/full_obfuscation.c << 'EOF'
+        /*
+         * Example: Full OLLVM Obfuscation
+         * Compile with: ollvm_heavy 29 full_obfuscation.c full_obfuscation
+         */
+        
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+        
+        // Obfuscated strings
+        const char* passwords[] = {
+            "admin123",
+            "password",
+            "letmein",
+            "qwerty"
+        };
+        
+        // Sensitive function with all obfuscations
+        int check_credentials(const char* user, const char* pass) {
+            int authenticated = 0;
+            
+            // Complex control flow (will be flattened)
+            if (user != NULL && pass != NULL) {
+                for (int i = 0; i < 4; i++) {
+                    if (strcmp(pass, passwords[i]) == 0) {
+                        authenticated = 1;
+                        break;
+                    }
+                }
+            }
+            
+            // Bogus control flow will be inserted here
+            return authenticated;
+        }
+        
+        // Mathematical operations (will be substituted)
+        int sensitive_calculation(int a, int b) {
+            int result = 0;
+            
+            // These operations will be substituted
+            result = a * b;
+            result = result + (a ^ b);
+            result = result - (a & b);
+            result = result | (a << 2);
+            
+            return result;
+        }
+        
+        // String processing (strings will be obfuscated)
+        void process_sensitive_data(char* data) {
+            char secret[] = "VERY_SECRET_KEY";
+            
+            for (int i = 0; data[i] != '\0'; i++) {
+                data[i] = data[i] ^ secret[i % strlen(secret)];
+            }
+        }
+        
+        int main() {
+            printf("Fully obfuscated Android application\n");
+            
+            // Test credentials check
+            int auth = check_credentials("admin", "admin123");
+            printf("Authentication: %s\n", auth ? "SUCCESS" : "FAILED");
+            
+            // Test sensitive calculation
+            int calc = sensitive_calculation(42, 17);
+            printf("Calculation result: %d\n", calc);
+            
+            // Test string obfuscation
+            char data[] = "Hello, this is sensitive data!";
+            printf("Original: %s\n", data);
+            process_sensitive_data(data);
+            printf("Encrypted: %s\n", data);
+            process_sensitive_data(data); // Decrypt
+            printf("Decrypted: %s\n", data);
+            
+            return 0;
+        }
+        EOF
+        
+        # Create comprehensive README
+        cat > android-api29-full-ollvm/README.md << 'EOF'
+        # Android API 29 Compiler with FULL OLLVM Obfuscation
+        
+        ## Complete OLLVM Obfuscation Suite
+        
+        ### Available Passes:
+        
+        1. **Control Flow Flattening (-fla)**
+           - Flattens control flow graphs
+           - Makes reverse engineering difficult
+           - Usage: `-mllvm -fla`
+        
+        2. **Instruction Substitution (-sub)**
+           - Replaces standard instructions with equivalent complex sequences
+           - Arithmetic and logical operations are substituted
+           - Usage: `-mllvm -sub`
+        
+        3. **Bogus Control Flow (-bcf)**
+           - Inserts fake basic blocks and jumps
+           - Creates misleading control flow
+           - Usage: `-mllvm -bcf`
+        
+        4. **Basic Block Splitting (-split)**
+           - Splits basic blocks into smaller pieces
+           - Increases code complexity
+           - Usage: `-mllvm -split`
+        
+        5. **String Obfuscation (-sobf)**
+           - Encrypts string literals in the binary
+           - Strings are decrypted at runtime
+           - Usage: `-mllvm -sobf`
+        
+        ### Preset Configurations:
+        
+        ```bash
+        # Load presets
+        source ollvm_presets.sh
+        
+        # Light obfuscation (performance friendly)
+        ollvm_light 29 app.c app
+        
+        # Medium obfuscation (balanced)
+        ollvm_medium 29 app.c app
+        
+        # Heavy obfuscation (maximum protection)
+        ollvm_heavy 29 app.c app
         ```
         
-        ## Test if it works:
-        ```bash
-        echo "int main(){return 0;}" > test.c
-        ./bin/clang -target aarch64-linux-android21 -c test.c -o test.o
+        ### Example Usage:
         
-        if [ -f "test.o" ]; then
-          echo "✅ Can create Android ARM64 object files"
-          file test.o  # Should show "ARM aarch64"
-        fi
+        ```bash
+        # Single pass
+        clang -target aarch64-linux-android29 \
+          --sysroot=$SYSROOT \
+          -mllvm -fla \
+          app.c -o app
+          
+        # Multiple passes
+        clang -target aarch64-linux-android29 \
+          --sysroot=$SYSROOT \
+          -mllvm -fla \
+          -mllvm -sub \
+          -mllvm -bcf \
+          -mllvm -sobf \
+          app.c -o app
+          
+        # With optimizations
+        clang -target aarch64-linux-android29 \
+          --sysroot=$SYSROOT \
+          -O2 \
+          -mllvm -fla \
+          -mllvm -sub \
+          app.c -o app
+        ```
+        
+        ### Tips:
+        
+        1. **Combine passes** for stronger protection
+        2. **Use with optimizations** (-O1, -O2, -O3)
+        3. **Test performance** - heavy obfuscation can impact speed
+        4. **Obfuscate selectively** - critical functions only
+        
+        ### Full Command Example:
+        ```bash
+        ./bin/clang -target aarch64-linux-android29 \
+          --sysroot=/path/to/android-ndk/sysroot \
+          -O2 \
+          -fvisibility=hidden \
+          -fdata-sections \
+          -ffunction-sections \
+          -mllvm -fla \
+          -mllvm -sub \
+          -mllvm -bcf \
+          -mllvm -split \
+          -mllvm -sobf \
+          -Wl,--gc-sections \
+          your_app.c -o your_app
         ```
         EOF
         
-        tar -czf android-arm64-ollvm.tar.gz android-arm64-ollvm/
-        echo "✅ Package created"
-
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: android-arm64-ollvm
-        path: android-arm64-ollvm.tar.gz
+        # Create quick test script
+        cat > android-api29-full-ollvm/test_all_passes.sh << 'EOF'
+        #!/bin/bash
+        echo "Testing ALL OLLVM passes..."
+        
+        # Set your Android NDK path
+        export ANDROID_NDK="${ANDROID_NDK:-/path/to/android-ndk-r25c}"
+        export SYSROOT="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+        export PATH="$(pwd)/bin:$PATH"
+        
+        # Create test file
+        cat > test.c << 'TESTEOF'
+        #include <stdio.h>
+        
+        int secret_function(int x) {
+            return x * 1337 + 42;
+        }
+        
+        int main() {
+            printf("Result: %d\n", secret_function(10));
+            return 0;
+        }
+        TESTEOF
+        
+        echo "Testing each OLLVM pass:"
+        
+        PASSES=("fla" "sub" "bcf" "split" "sobf")
+        for pass in "${PASSES[@]}"; do
+            echo -n "  - Testing -$pass: "
+            clang -target aarch64-linux-android29 \
+              --sysroot="$SYSROOT" \
+              -mllvm -$pass \
+              -c test.c -o "test_$pass.o" 2>/dev/null
+            
+            if [ $? -eq 0 ]; then
+                echo "✅ PASS"
+            else
+                echo "❌ FAIL"
+            fi
+        done
+        
+        echo ""
+        
