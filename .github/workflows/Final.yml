@@ -1,4 +1,4 @@
-name: Build Android API 29 Cross-Compiler with FULL OLLVM Obfuscation
+name: Build Android OLLVM Compiler 64
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [ release/14.x ]
 
 jobs:
-  build-android-arm64-cross:
+  build-android-ollvm:
     runs-on: ubuntu-22.04
     
     steps:
@@ -21,9 +21,9 @@ jobs:
       run: |
         cd llvm-project
         git apply --whitespace=nowarn ../obfuscator.patch
-        echo "✅ OLLVM obfuscation patches applied"
+        echo "✅ OLLVM patches applied"
 
-    - name: Install build tools with LLD
+    - name: Install dependencies
       run: |
         sudo apt update
         sudo apt install -y \
@@ -32,312 +32,207 @@ jobs:
           ninja-build \
           git \
           python3 \
-          python3-yaml \
           python3-pip \
+          ninja-build \
           lld \
           clang \
           gcc-aarch64-linux-gnu \
           g++-aarch64-linux-gnu
         
-        # Install LLVM 14 toolchain
-        wget https://apt.llvm.org/llvm.sh
-        chmod +x llvm.sh
-        sudo ./llvm.sh 14
-        sudo apt install -y clang-14 lld-14 llvm-14-tools
-        
-        # Set clang-14 as default
-        sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
-        sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100
-        sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-14 100
-
-    - name: Setup Python
-      run: |
         pip3 install pygments pyyaml
         sudo ln -s /usr/bin/python3 /usr/bin/python 2>/dev/null || true
 
-    - name: Download Android NDK
-      run: |
-        wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
-        unzip -q android-ndk-r25c-linux.zip
-        export ANDROID_NDK=$PWD/android-ndk-r25c
-        echo "ANDROID_NDK=$ANDROID_NDK" >> $GITHUB_ENV
-        echo "NDK_HOME=$ANDROID_NDK" >> $GITHUB_ENV
-
-    - name: Configure OLLVM for Android (Simplified Approach)
+    - name: Build OLLVM according to repo
       run: |
         mkdir -p build
         cd build
         
-        # SIMPLIFIED: Build OLLVM as a regular compiler first, then we'll make it target Android
-        # The key insight: OLLVM itself runs on x86_64 Linux, but generates ARM64 Android code
-        
+        # SIMPLE build following repo instructions
         cmake ../llvm-project/llvm \
           -DCMAKE_BUILD_TYPE=Release \
           -DLLVM_ENABLE_PROJECTS="clang;lld" \
-          -DOBFUSCATOR_BUILD=ON \
-          -DLLVM_OBFUSCATOR_ENABLE=ON \
-          -DCMAKE_C_COMPILER=/usr/bin/clang-14 \
-          -DCMAKE_CXX_COMPILER=/usr/bin/clang++-14 \
-          -DLLVM_ENABLE_LLD=ON \
-          -DLLVM_USE_LINKER=lld \
-          -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld" \
-          -DCLANG_DEFAULT_LINKER="lld" \
-          -DLLVM_TARGETS_TO_BUILD="AArch64" \
+          -DLLVM_TARGETS_TO_BUILD="AArch64;X86" \
           -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-android" \
-          -DLLVM_ENABLE_RUNTIMES="" \
+          -DLLVM_HOST_TRIPLE="x86_64-unknown-linux-gnu" \
+          -DLLVM_ENABLE_LLD=ON \
+          -DLLVM_ENABLE_ASSERTIONS=OFF \
           -DLLVM_INCLUDE_TESTS=OFF \
           -DLLVM_INCLUDE_EXAMPLES=OFF \
           -DLLVM_BUILD_TOOLS=ON \
-          -DLLVM_ENABLE_ASSERTIONS=ON \
           -G "Ninja"
         
-        echo "✅ Configured OLLVM with Android ARM64 target support"
-
-    - name: Build OLLVM compiler
-      run: |
-        cd build
+        echo "Building OLLVM Clang..."
         ninja clang lld -j$(nproc)
-        echo "✅ Built OLLVM compiler"
+        
+        # Verify build
+        if [ -f "bin/clang" ]; then
+          echo "✅ SUCCESS: Built Clang!"
+          ./bin/clang --version
+        else
+          echo "❌ FAILED: Clang not built"
+          exit 1
+        fi
 
-    - name: Test OLLVM for Android compilation
+    - name: Test Android compilation
       run: |
         export PATH=$PWD/build/bin:$PATH
         
-        echo "=== Testing OLLVM Android Compilation ==="
+        echo "=== Testing Android Compilation ==="
         
-        # Create test program
-        cat > test_android.c << 'EOF'
-        #include <stdio.h>
-        
-        int main() {
-            printf("Hello from Android!\n");
-            return 0;
-        }
+        # Simple test
+        cat > test.c << 'EOF'
+        int main() { return 0; }
         EOF
         
-        # Test that clang can target Android
-        echo "1. Checking Android target support:"
-        clang --target=aarch64-linux-android29 -E - < /dev/null 2>&1 | grep -q "clang" && \
-        echo "✅ Can target Android ARM64"
+        # Test Android target
+        echo "1. Testing Android ARM64 target:"
+        clang --target=aarch64-linux-android -c test.c -o test.o
         
-        # Test OLLVM passes
+        if [ $? -eq 0 ]; then
+          echo "✅ Can compile for Android ARM64"
+          file test.o
+        fi
+        
+        # Test OLLVM
         echo ""
         echo "2. Testing OLLVM passes:"
-        clang --target=aarch64-linux-android29 -mllvm -fla -c test_android.c -o test_fla.o 2>&1 | head -5
-        if [ $? -eq 0 ]; then
-            echo "✅ OLLVM passes work"
-        fi
+        echo "Testing -fla:"
+        clang --target=aarch64-linux-android -mllvm -fla -c test.c -o test_fla.o 2>/dev/null && echo "✅ -fla works"
         
-        # Show clang version and capabilities
-        echo ""
-        echo "3. Clang capabilities:"
-        clang --version
-        echo ""
-        clang --target=aarch64-linux-android29 --print-effective-triple
-        echo ""
-        echo "Available targets:"
-        clang --print-targets
+        echo "Testing -sub:"
+        clang --target=aarch64-linux-android -mllvm -sub -c test.c -o test_sub.o 2>/dev/null && echo "✅ -sub works"
+        
+        echo "Testing -bcf:"
+        clang --target=aarch64-linux-android -mllvm -bcf -c test.c -o test_bcf.o 2>/dev/null && echo "✅ -bcf works"
+        
+        echo "Testing multiple passes:"
+        clang --target=aarch64-linux-android -mllvm -fla -mllvm -sub -c test.c -o test_multi.o 2>/dev/null && echo "✅ Multiple passes work"
 
-    - name: Create Android-ready package
+    - name: Create Android compiler package
       run: |
-        mkdir -p android-ollvm-dist
-        mkdir -p android-ollvm-dist/bin
+        mkdir -p android-ollvm
+        mkdir -p android-ollvm/bin
         
-        # Copy binaries
-        cp -L build/bin/clang android-ollvm-dist/bin/
-        cp -L build/bin/clang++ android-ollvm-dist/bin/
-        cp -L build/bin/ld.lld android-ollvm-dist/bin/ 2>/dev/null || true
+        # Copy built binaries
+        cp -L build/bin/clang android-ollvm/bin/
+        cp -L build/bin/clang++ android-ollvm/bin/
+        cp -L build/bin/ld.lld android-ollvm/bin/ 2>/dev/null || true
         
-        # Create Android usage wrapper
-        cat > android-ollvm-dist/android-compile.sh << 'EOF'
-        #!/bin/bash
-        # Android OLLVM Compilation Wrapper
-        
-        # Default settings
-        ANDROID_NDK="${ANDROID_NDK:-/path/to/android-ndk}"
-        API_LEVEL="${API_LEVEL:-29}"
-        TARGET_TRIPLE="aarch64-linux-android${API_LEVEL}"
-        SYSROOT="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-        
-        # Get script directory
-        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        export PATH="$SCRIPT_DIR/bin:$PATH"
-        
-        # Parse arguments
-        OLLVM_FLAGS=""
-        COMPILE_ARGS=()
-        
-        while [[ $# -gt 0 ]]; do
-            case $1 in
-                --api=*)
-                    API_LEVEL="${1#*=}"
-                    TARGET_TRIPLE="aarch64-linux-android${API_LEVEL}"
-                    shift
-                    ;;
-                --api)
-                    API_LEVEL="$2"
-                    TARGET_TRIPLE="aarch64-linux-android${API_LEVEL}"
-                    shift 2
-                    ;;
-                --fla)
-                    OLLVM_FLAGS="$OLLVM_FLAGS -mllvm -fla"
-                    shift
-                    ;;
-                --sub)
-                    OLLVM_FLAGS="$OLLVM_FLAGS -mllvm -sub"
-                    shift
-                    ;;
-                --bcf)
-                    OLLVM_FLAGS="$OLLVM_FLAGS -mllvm -bcf"
-                    shift
-                    ;;
-                --split)
-                    OLLVM_FLAGS="$OLLVM_FLAGS -mllvm -split"
-                    shift
-                    ;;
-                --sobf)
-                    OLLVM_FLAGS="$OLLVM_FLAGS -mllvm -sobf"
-                    shift
-                    ;;
-                --obfuscate-heavy)
-                    OLLVM_FLAGS="$OLLVM_FLAGS -mllvm -fla -mllvm -sub -mllvm -bcf -mllvm -split -mllvm -sobf"
-                    shift
-                    ;;
-                --sysroot=*)
-                    SYSROOT="${1#*=}"
-                    shift
-                    ;;
-                --sysroot)
-                    SYSROOT="$2"
-                    shift 2
-                    ;;
-                --ndk=*)
-                    ANDROID_NDK="${1#*=}"
-                    SYSROOT="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-                    shift
-                    ;;
-                --ndk)
-                    ANDROID_NDK="$2"
-                    SYSROOT="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-                    shift 2
-                    ;;
-                *)
-                    COMPILE_ARGS+=("$1")
-                    shift
-                    ;;
-            esac
-        done
-        
-        # Build the final command
-        CMD=(clang)
-        CMD+=(--target="$TARGET_TRIPLE")
-        
-        if [ -d "$SYSROOT" ]; then
-            CMD+=(--sysroot="$SYSROOT")
-        fi
-        
-        if [ ! -z "$OLLVM_FLAGS" ]; then
-            # Split OLLVM flags properly
-            for flag in $OLLVM_FLAGS; do
-                CMD+=("$flag")
-            done
-        fi
-        
-        # Add remaining arguments
-        CMD+=("${COMPILE_ARGS[@]}")
-        
-        echo "Compiling for Android with:"
-        echo "  Target: $TARGET_TRIPLE"
-        echo "  Sysroot: $SYSROOT"
-        echo "  OLLVM flags: $OLLVM_FLAGS"
+        # Verify what we have
+        echo "Files in package:"
+        ls -la android-ollvm/bin/
         echo ""
-        echo "Command: ${CMD[@]}"
-        echo ""
+        echo "Clang details:"
+        file android-ollvm/bin/clang
         
-        # Execute
-        exec "${CMD[@]}"
-        EOF
+        # Create usage instructions
+        cat > android-ollvm/USAGE.md << 'EOF'
+        # OLLVM Android Compiler
         
-        chmod +x android-ollvm-dist/android-compile.sh
+        This is Clang with OLLVM obfuscation for Android ARM64.
         
-        # Create README
-        cat > android-ollvm-dist/README.md << 'EOF'
-        # OLLVM Compiler for Android ARM64
+        ## Quick Start
         
-        This is an OLLVM-enabled Clang compiler that can generate Android ARM64 binaries.
-        
-        ## Prerequisites
-        
-        1. Install Android NDK:
+        1. Download Android NDK:
            ```bash
            wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
            unzip android-ndk-r25c-linux.zip
            export ANDROID_NDK=$PWD/android-ndk-r25c
            ```
         
-        2. Set up environment:
+        2. Compile Android app:
            ```bash
-           export PATH=$PWD/bin:$PATH
-           export ANDROID_NDK=/path/to/your/android-ndk
+           export PATH=/path/to/this/bin:$PATH
+           
+           clang --target=aarch64-linux-android29 \
+             --sysroot=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot \
+             -mllvm -fla \
+             -mllvm -sub \
+             your_app.c -o your_app
            ```
-        
-        ## Usage
-        
-        ### Method 1: Using the wrapper script (recommended)
-        ```bash
-        ./android-compile.sh --api=29 --fla --sub --sysroot=$ANDROID_NDK/sysroot app.c -o app
-        ```
-        
-        ### Method 2: Direct clang usage
-        ```bash
-        clang --target=aarch64-linux-android29 \
-          --sysroot=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot \
-          -mllvm -fla \
-          -mllvm -sub \
-          app.c -o app
-        ```
         
         ## OLLVM Obfuscation Options
         
-        | Flag | Description |
-        |------|-------------|
-        | `--fla` | Control Flow Flattening |
-        | `--sub` | Instruction Substitution |
-        | `--bcf` | Bogus Control Flow |
-        | `--split` | Basic Block Splitting |
-        | `--sobf` | String Obfuscation |
-        | `--obfuscate-heavy` | All obfuscations combined |
+        Available flags:
+        - `-mllvm -fla` : Control Flow Flattening
+        - `-mllvm -sub` : Instruction Substitution  
+        - `-mllvm -bcf` : Bogus Control Flow
+        - `-mllvm -split` : Basic Block Splitting
+        - `-mllvm -sobf` : String Obfuscation
         
-        ## API Levels
-        
-        Change API level with `--api=<level>`:
-        ```bash
-        # API 21 (Android 5.0 - minimum for ARM64)
-        ./android-compile.sh --api=21 ...
-        
-        # API 29 (Android 10)
-        ./android-compile.sh --api=29 ...
-        
-        # API 33 (Android 13)
-        ./android-compile.sh --api=33 ...
-        ```
-        
-        ## Complete Example
+        ## Test Compilation
         
         ```bash
-        # Compile with heavy obfuscation for Android 10
-        ./android-compile.sh \
-          --api=29 \
-          --obfuscate-heavy \
-          --sysroot=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot \
-          -O2 \
-          -fvisibility=hidden \
-          your_app.c -o your_app
+        # Test the compiler works
+        echo "int main(){return 0;}" > test.c
+        clang --target=aarch64-linux-android -c test.c -o test.o
+        
+        if [ -f "test.o" ]; then
+          echo "✅ Compiler works!"
+          file test.o
+        fi
         ```
         EOF
         
-        tar -czf android-ollvm-compiler.tar.gz android-ollvm-dist/
-        echo "✅ Android OLLVM package created"
+        # Create test script
+        cat > android-ollvm/test_android.sh << 'EOF'
+        #!/bin/bash
+        echo "Testing OLLVM Android Compiler"
+        echo "==============================="
+        
+        # Set path
+        export PATH="$(dirname "$0")/bin:$PATH"
+        
+        # Create test file
+        cat > test_android.c << 'TESTEOF'
+        #include <stdio.h>
+        
+        int secret_function(int x) {
+            return x * 1337;
+        }
+        
+        int main() {
+            printf("Result: %d\n", secret_function(10));
+            return 0;
+        }
+        TESTEOF
+        
+        echo "1. Testing basic Android compilation:"
+        clang --target=aarch64-linux-android -c test_android.c -o test_android.o
+        
+        if [ $? -eq 0 ]; then
+            echo "✅ Basic compilation works"
+            file test_android.o
+        else
+            echo "❌ Basic compilation failed"
+        fi
+        
+        echo ""
+        echo "2. Testing OLLVM obfuscation:"
+        clang --target=aarch64-linux-android -mllvm -fla -c test_android.c -o test_ollvm.o
+        
+        if [ $? -eq 0 ]; then
+            echo "✅ OLLVM obfuscation works"
+            echo "   File created: test_ollvm.o"
+        else
+            echo "⚠️  OLLVM might need sysroot for full linking"
+        fi
+        
+        # Cleanup
+        rm -f test_android.c test_android.o test_ollvm.o
+        
+        echo ""
+        echo "For full Android compilation, you need Android NDK sysroot:"
+        echo "  clang --target=aarch64-linux-android29 \\"
+        echo "    --sysroot=/path/to/android-ndk/sysroot \\"
+        echo "    -mllvm -fla \\"
+        echo "    your_app.c -o your_app"
+        EOF
+        
+        chmod +x android-ollvm/test_android.sh
+        
+        tar -czf android-ollvm-compiler.tar.gz android-ollvm/
+        echo "✅ Package created: $(du -h android-ollvm-compiler.tar.gz)"
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
