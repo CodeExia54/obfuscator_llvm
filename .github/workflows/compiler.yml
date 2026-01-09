@@ -3,51 +3,44 @@ name: Build Android OLLVM Compiler ARM64
 on:
   workflow_dispatch:
     inputs:
-      # Tool selection checkboxes
       build_lld:
-        description: 'Build LLD (linker)'
+        description: 'Build LLD linker'
         type: boolean
-        default: true
+        default: false
       build_ar:
-        description: 'Build llvm-ar (archiver)'
+        description: 'Build llvm-ar archiver'
         type: boolean
-        default: true
+        default: false
       build_nm:
-        description: 'Build llvm-nm (symbol lister)'
+        description: 'Build llvm-nm symbol lister'
         type: boolean
-        default: true
+        default: false
       build_strip_tool:
-        description: 'Build llvm-strip (binary stripper)'
+        description: 'Build llvm-strip'
         type: boolean
-        default: true
+        default: false
       build_objcopy:
-        description: 'Build llvm-objcopy (object copier)'
+        description: 'Build llvm-objcopy'
         type: boolean
-        default: true
+        default: false
       build_objdump:
-        description: 'Build llvm-objdump (disassembler)'
+        description: 'Build llvm-objdump'
         type: boolean
-        default: true
+        default: false
       build_readelf:
-        description: 'Build llvm-readelf (ELF analyzer)'
+        description: 'Build llvm-readelf'
         type: boolean
-        default: true
+        default: false
       build_ranlib:
-        description: 'Build llvm-ranlib (archive indexer)'
+        description: 'Build llvm-ranlib'
         type: boolean
-        default: true
-      
-      # Stripping options
+        default: false
       strip_binaries:
-        description: 'Strip binaries after build (reduces size)'
+        description: 'Strip binaries after build'
         type: boolean
         default: true
       strip_aggressively:
-        description: 'Aggressive stripping (removes ALL debug symbols)'
-        type: boolean
-        default: false
-      create_unstripped_copy:
-        description: 'Also create unstripped package (for debugging)'
+        description: 'Aggressive stripping'
         type: boolean
         default: false
 
@@ -66,14 +59,12 @@ jobs:
     - name: Apply OLLVM patch
       run: |
         cd llvm-project
-        echo "Applying OLLVM patch..."
         if git apply --check ../obfuscator.patch; then
           git apply --whitespace=nowarn ../obfuscator.patch
-          echo "✅ OLLVM patches applied"
+          echo "OLLVM patches applied"
         else
-          echo "⚠️ Patch doesn't apply cleanly, trying with rejections..."
           git apply --whitespace=nowarn ../obfuscator.patch --reject || true
-          echo "Applied with possible rejections"
+          echo "Patch applied with possible rejections"
         fi
 
     - name: Install dependencies
@@ -91,8 +82,7 @@ jobs:
           g++-aarch64-linux-gnu \
           libc6-dev-i386 \
           zlib1g-dev \
-          binutils \
-          file  # For file command analysis
+          binutils
         
         pip3 install pygments pyyaml
         sudo ln -s /usr/bin/python3 /usr/bin/python 2>/dev/null || true
@@ -102,18 +92,14 @@ jobs:
         mkdir -p build
         cd build
         
-        echo "=== Building OLLVM for Android ARM64 ==="
-        echo "Using host compiler: $(clang --version | head -1)"
+        echo "Building OLLVM for Android ARM64..."
         
-        # Build configuration
         LLVM_PROJECTS="clang"
         
-        # Add LLD if requested
         if ${{ github.event.inputs.build_lld }}; then
           LLVM_PROJECTS="$LLVM_PROJECTS;lld"
         fi
         
-        # Check each tool individually
         if ${{ github.event.inputs.build_ar }}; then
           LLVM_PROJECTS="$LLVM_PROJECTS;llvm-ar"
         fi
@@ -142,7 +128,7 @@ jobs:
           LLVM_PROJECTS="$LLVM_PROJECTS;llvm-ranlib"
         fi
         
-        echo "Building projects: $LLVM_PROJECTS"
+        echo "Projects: $LLVM_PROJECTS"
         
         cmake ../llvm-project/llvm \
           -DCMAKE_BUILD_TYPE=Release \
@@ -159,262 +145,131 @@ jobs:
           -DCMAKE_ASM_COMPILER=clang \
           -G "Ninja"
         
-        echo "Building OLLVM..."
         ninja -j$(nproc)
         
-        echo ""
-        echo "=== Build Summary ==="
-        echo "Built binaries:"
-        ls -la bin/
+        echo "Build complete"
+        ls -1 bin/ | head -10
 
-    - name: Strip binaries (optional)
+    - name: Strip binaries
       if: ${{ github.event.inputs.strip_binaries }}
       run: |
-        echo "=== Stripping Binaries ==="
         cd build/bin
         
-        # Determine stripping level
         if ${{ github.event.inputs.strip_aggressively }}; then
           STRIP_FLAGS="--strip-all"
-          STRIP_LEVEL="AGGRESSIVE (removes ALL symbols)"
+          echo "Aggressive stripping"
         else
           STRIP_FLAGS="--strip-debug"
-          STRIP_LEVEL="NORMAL (keeps essential symbols)"
+          echo "Normal stripping"
         fi
         
-        echo "Stripping level: $STRIP_LEVEL"
-        echo "Strip flags: $STRIP_FLAGS"
+        BINARIES=("clang" "clang++")
         
-        # List of binaries to strip
-        BINARIES_TO_STRIP=("clang" "clang++")
-        
-        # Add LLD if built
         if ${{ github.event.inputs.build_lld }}; then
-          BINARIES_TO_STRIP+=("lld" "ld.lld")
+          BINARIES+=("lld" "ld.lld")
         fi
         
-        # Add other tools if built
         if ${{ github.event.inputs.build_ar }}; then
-          BINARIES_TO_STRIP+=("llvm-ar")
+          BINARIES+=("llvm-ar")
         fi
         
         if ${{ github.event.inputs.build_nm }}; then
-          BINARIES_TO_STRIP+=("llvm-nm")
+          BINARIES+=("llvm-nm")
         fi
         
         if ${{ github.event.inputs.build_strip_tool }}; then
-          BINARIES_TO_STRIP+=("llvm-strip")
+          BINARIES+=("llvm-strip")
         fi
         
         if ${{ github.event.inputs.build_objcopy }}; then
-          BINARIES_TO_STRIP+=("llvm-objcopy")
+          BINARIES+=("llvm-objcopy")
         fi
         
         if ${{ github.event.inputs.build_objdump }}; then
-          BINARIES_TO_STRIP+=("llvm-objdump")
+          BINARIES+=("llvm-objdump")
         fi
         
         if ${{ github.event.inputs.build_readelf }}; then
-          BINARIES_TO_STRIP+=("llvm-readelf")
+          BINARIES+=("llvm-readelf")
         fi
         
         if ${{ github.event.inputs.build_ranlib }}; then
-          BINARIES_TO_STRIP+=("llvm-ranlib")
+          BINARIES+=("llvm-ranlib")
         fi
         
-        echo ""
-        echo "Stripping ${#BINARIES_TO_STRIP[@]} binaries:"
-        echo "${BINARIES_TO_STRIP[@]}"
-        echo ""
+        echo "Stripping ${#BINARIES[@]} binaries"
         
-        # Track total savings
-        TOTAL_ORIGINAL=0
-        TOTAL_STRIPPED=0
-        
-        # Strip each binary
-        for binary in "${BINARIES_TO_STRIP[@]}"; do
+        TOTAL_SAVED=0
+        for binary in "${BINARIES[@]}"; do
           if [ -f "$binary" ]; then
-            # Check if already stripped
-            if file "$binary" | grep -q "not stripped"; then
-              original_size=$(stat -c%s "$binary")
-              echo "Stripping $binary (${original_size} bytes)..."
-              
-              # Perform stripping
-              if strip $STRIP_FLAGS "$binary" 2>/dev/null; then
-                stripped_size=$(stat -c%s "$binary")
-                reduction=$((original_size - stripped_size))
-                reduction_pct=$((reduction * 100 / original_size))
-                
-                # Update totals
-                TOTAL_ORIGINAL=$((TOTAL_ORIGINAL + original_size))
-                TOTAL_STRIPPED=$((TOTAL_STRIPPED + stripped_size))
-                
-                echo "  ✅ Reduced by ${reduction_pct}% (${reduction} bytes)"
-                echo "  Now: ${stripped_size} bytes"
-                
-                # Verify stripping
-                STRIP_STATUS=$(file "$binary" | grep -o "stripped\|not stripped")
-                echo "  Status: $STRIP_STATUS"
-              else
-                echo "  ⚠️ Failed to strip (may be already stripped or protected)"
-              fi
-            else
-              echo "⚠️ $binary already stripped, skipping"
-            fi
-            echo ""
+            original=$(stat -c%s "$binary")
+            strip $STRIP_FLAGS "$binary" 2>/dev/null || continue
+            stripped=$(stat -c%s "$binary")
+            saved=$((original - stripped))
+            TOTAL_SAVED=$((TOTAL_SAVED + saved))
+            echo "  $binary: $((saved/1024))KB saved"
           fi
         done
         
-        # Show total savings
-        if [ $TOTAL_ORIGINAL -gt 0 ]; then
-          TOTAL_REDUCTION=$((TOTAL_ORIGINAL - TOTAL_STRIPPED))
-          TOTAL_REDUCTION_PCT=$((TOTAL_REDUCTION * 100 / TOTAL_ORIGINAL))
-          echo "=== TOTAL SAVINGS ==="
-          echo "Original total: $((TOTAL_ORIGINAL / 1024 / 1024)) MB"
-          echo "Stripped total: $((TOTAL_STRIPPED / 1024 / 1024)) MB"
-          echo "Reduction: $((TOTAL_REDUCTION / 1024 / 1024)) MB (${TOTAL_REDUCTION_PCT}%)"
+        if [ $TOTAL_SAVED -gt 0 ]; then
+          echo "Total saved: $((TOTAL_SAVED/1024/1024))MB"
         fi
 
-    - name: Create stripped package
+    - name: Create package
       run: |
-        mkdir -p android-ollvm-arm64
         mkdir -p android-ollvm-arm64/bin
-        mkdir -p android-ollvm-arm64/lib
         
-        echo "=== Creating Android OLLVM ARM64 Package ==="
+        echo "Creating package..."
         
-        # Always copy clang
-        echo "Copying Clang compiler..."
         cp -L build/bin/clang android-ollvm-arm64/bin/
         cp -L build/bin/clang++ android-ollvm-arm64/bin/
         
-        # Copy LLD if built
         if ${{ github.event.inputs.build_lld }}; then
-          echo "Copying LLD linker..."
-          if [ -f "build/bin/lld" ]; then
-            cp -L build/bin/lld android-ollvm-arm64/bin/
-          fi
-          if [ -f "build/bin/ld.lld" ]; then
-            cp -L build/bin/ld.lld android-ollvm-arm64/bin/
-          fi
+          [ -f "build/bin/lld" ] && cp -L build/bin/lld android-ollvm-arm64/bin/
+          [ -f "build/bin/ld.lld" ] && cp -L build/bin/ld.lld android-ollvm-arm64/bin/
         fi
         
-        # Copy other tools if built
         if ${{ github.event.inputs.build_ar }} && [ -f "build/bin/llvm-ar" ]; then
-          echo "Copying llvm-ar..."
           cp -L build/bin/llvm-ar android-ollvm-arm64/bin/
         fi
         
         if ${{ github.event.inputs.build_nm }} && [ -f "build/bin/llvm-nm" ]; then
-          echo "Copying llvm-nm..."
           cp -L build/bin/llvm-nm android-ollvm-arm64/bin/
         fi
         
         if ${{ github.event.inputs.build_strip_tool }} && [ -f "build/bin/llvm-strip" ]; then
-          echo "Copying llvm-strip..."
           cp -L build/bin/llvm-strip android-ollvm-arm64/bin/
         fi
         
         if ${{ github.event.inputs.build_objcopy }} && [ -f "build/bin/llvm-objcopy" ]; then
-          echo "Copying llvm-objcopy..."
           cp -L build/bin/llvm-objcopy android-ollvm-arm64/bin/
         fi
         
         if ${{ github.event.inputs.build_objdump }} && [ -f "build/bin/llvm-objdump" ]; then
-          echo "Copying llvm-objdump..."
           cp -L build/bin/llvm-objdump android-ollvm-arm64/bin/
         fi
         
         if ${{ github.event.inputs.build_readelf }} && [ -f "build/bin/llvm-readelf" ]; then
-          echo "Copying llvm-readelf..."
           cp -L build/bin/llvm-readelf android-ollvm-arm64/bin/
         fi
         
         if ${{ github.event.inputs.build_ranlib }} && [ -f "build/bin/llvm-ranlib" ]; then
-          echo "Copying llvm-ranlib..."
           cp -L build/bin/llvm-ranlib android-ollvm-arm64/bin/
         fi
         
-        # Copy Clang runtime if available
         if [ -d "build/lib/clang" ]; then
           CLANG_VER=$(ls build/lib/clang/ | head -1)
-          echo "Found Clang version: $CLANG_VER"
           mkdir -p android-ollvm-arm64/lib/clang/$CLANG_VER
           cp -r build/lib/clang/$CLANG_VER/include android-ollvm-arm64/lib/clang/$CLANG_VER/ 2>/dev/null || true
         fi
         
-        # Show package contents with stripping status
-        echo ""
-        echo "=== Package Contents ==="
-        echo "Stripping status:"
-        for binary in android-ollvm-arm64/bin/*; do
-          if [ -f "$binary" ]; then
-            size=$(stat -c%s "$binary" 2>/dev/null || echo "0")
-            strip_status=$(file "$binary" | grep -o "stripped\|not stripped" || echo "unknown")
-            printf "  %-20s %10d bytes  [%s]\n" "$(basename "$binary")" "$size" "$strip_status"
-          fi
-        done
-        
-        echo ""
-        echo "Total package size before compression:"
-        du -sh android-ollvm-arm64
-        
-        # Create stripped archive
         tar -czf android-ollvm-arm64.tar.gz android-ollvm-arm64/
         
-        echo ""
-        echo "✅ Stripped package created: android-ollvm-arm64.tar.gz"
-        echo "   Size: $(du -h android-ollvm-arm64.tar.gz | cut -f1)"
+        echo "Package size: $(du -h android-ollvm-arm64.tar.gz | cut -f1)"
 
-    - name: Create unstripped package (optional)
-      if: ${{ github.event.inputs.create_unstripped_copy && github.event.inputs.strip_binaries }}
-      run: |
-        echo "=== Creating Unstripped Package ==="
-        
-        # We need to rebuild without stripping for unstripped version
-        # Or create a copy before stripping happened
-        echo "⚠️ Cannot create unstripped package after binaries were stripped"
-        echo "   To get unstripped binaries, run workflow with:"
-        echo "   - strip_binaries: false"
-        echo "   OR"
-        echo "   - create_unstripped_copy: true AND strip_binaries: false"
-        
-        # Alternative: Save unstripped binaries before stripping step
-        # This would require saving binaries earlier in the workflow
-
-    - name: Upload artifacts
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: android-ollvm-arm64-compiler
-        path: |
-          android-ollvm-arm64.tar.gz
+        path: android-ollvm-arm64.tar.gz
         retention-days: 7
-
-    - name: Display summary
-      run: |
-        echo "=========================================="
-        echo "🚀 OLLVM Android ARM64 Compiler Built Successfully!"
-        echo "=========================================="
-        echo ""
-        echo "📦 Artifact: android-ollvm-arm64-compiler"
-        echo ""
-        echo "⚙️  Build Configuration:"
-        echo "   - Stripping: ${{ github.event.inputs.strip_binaries && 'ENABLED' || 'DISABLED' }}"
-        if ${{ github.event.inputs.strip_binaries }}; then
-          echo "   - Aggressive: ${{ github.event.inputs.strip_aggressively && 'YES' || 'NO' }}"
-        fi
-        echo ""
-        echo "🔧 Included Tools:"
-        echo "   Always: clang, clang++"
-        if ${{ github.event.inputs.build_lld }}; then echo "   ✅ LLD linker"; fi
-        if ${{ github.event.inputs.build_ar }}; then echo "   ✅ llvm-ar"; fi
-        if ${{ github.event.inputs.build_nm }}; then echo "   ✅ llvm-nm"; fi
-        if ${{ github.event.inputs.build_strip_tool }}; then echo "   ✅ llvm-strip"; fi
-        if ${{ github.event.inputs.build_objcopy }}; then echo "   ✅ llvm-objcopy"; fi
-        if ${{ github.event.inputs.build_objdump }}; then echo "   ✅ llvm-objdump"; fi
-        if ${{ github.event.inputs.build_readelf }}; then echo "   ✅ llvm-readelf"; fi
-        if ${{ github.event.inputs.build_ranlib }}; then echo "   ✅ llvm-ranlib"; fi
-        echo ""
-        echo "📚 Usage:"
-        echo "   clang --target=aarch64-linux-android -mllvm -fla app.c"
-        echo "=========================================="
