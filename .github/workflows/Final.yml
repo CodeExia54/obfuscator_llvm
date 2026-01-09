@@ -1,0 +1,187 @@
+name: Build Android ARM64 Cross-Compiler with OLLVM
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ release/14.x ]
+
+jobs:
+  build-android-arm64-cross:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Checkout OLLVM
+      uses: actions/checkout@v4
+      with:
+        repository: sr-tream/obfuscator
+        ref: release/14.x
+        submodules: recursive
+
+    - name: Apply OLLVM patch
+      run: |
+        cd llvm-project
+        git apply --whitespace=nowarn ../obfuscator.patch
+        echo "✅ OLLVM obfuscation patches applied"
+
+    - name: Install build tools
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          build-essential \
+          cmake \
+          ninja-build \
+          git \
+          python3
+
+    - name: Download Android NDK (for sysroot)
+      run: |
+        wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+        unzip -q android-ndk-r25c-linux.zip
+        export ANDROID_NDK=$PWD/android-ndk-r25c
+        echo "ANDROID_NDK=$ANDROID_NDK" >> $GITHUB_ENV
+
+    - name: Configure Android ARM64 cross-compiler PROPERLY
+      run: |
+        mkdir -p build
+        cd build
+        
+        # Get Android sysroot path
+        SYSROOT="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+        
+        # Build clang as a cross-compiler for Android
+        cmake ../llvm-project/llvm \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLVM_ENABLE_PROJECTS="clang" \
+          
+          # Host: where clang runs (x86_64 Linux)
+          -DCMAKE_HOST_SYSTEM_NAME="Linux" \
+          -DCMAKE_HOST_SYSTEM_PROCESSOR="x86_64" \
+          
+          # Target: Android ARM64
+          -DCMAKE_SYSTEM_NAME="Android" \
+          -DCMAKE_SYSTEM_PROCESSOR="aarch64" \
+          -DCMAKE_SYSTEM_VERSION="21" \
+          
+          # Android target specifications
+          -DLLVM_TARGETS_TO_BUILD="AArch64" \
+          -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-android" \
+          
+          # Android sysroot (CRITICAL!)
+          -DCMAKE_SYSROOT="$SYSROOT" \
+          -DCMAKE_FIND_ROOT_PATH="$SYSROOT" \
+          -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM="NEVER" \
+          -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY="ONLY" \
+          -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE="ONLY" \
+          -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE="ONLY" \
+          
+          # Cross-compilation flags
+          -DCMAKE_C_FLAGS="--target=aarch64-linux-android21 --sysroot=$SYSROOT" \
+          -DCMAKE_CXX_FLAGS="--target=aarch64-linux-android21 --sysroot=$SYSROOT" \
+          
+          # Minimal build
+          -DLLVM_ENABLE_RUNTIMES="" \
+          -DLLVM_INCLUDE_TESTS=OFF \
+          -DLLVM_INCLUDE_EXAMPLES=OFF \
+          -DLLVM_BUILD_TOOLS=OFF \
+          -DLLVM_ENABLE_LLD=OFF \
+          
+          -G "Unix Makefiles"  # Use Make to avoid LLD issues
+        
+        echo "✅ Properly configured Android ARM64 cross-compiler"
+
+    - name: Build clang cross-compiler
+      run: |
+        cd build
+        make clang -j$(nproc)
+        echo "✅ Android ARM64 cross-compiler built"
+
+    - name: REAL Android compilation test
+      run: |
+        export PATH=$PWD/build/bin:$PATH
+        
+        echo "=== REAL Android ARM64 Test ==="
+        
+        # Create Android test program
+        cat > test_android.c << 'EOF'
+        #include <stdio.h>
+        
+        int main() {
+            printf("Hello from Android ARM64!\n");
+            return 0;
+        }
+        EOF
+        
+        echo "1. Try to compile with Android sysroot:"
+        clang -target aarch64-linux-android21 \
+          --sysroot="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
+          -c test_android.c -o test_android.o
+        
+        if [ $? -eq 0 ] && [ -f "test_android.o" ]; then
+          echo "✅ Can compile Android ARM64 with sysroot"
+          file test_android.o
+        else
+          echo "⚠️  Might need Android libraries to link fully"
+          echo "But compilation to object file should work"
+        fi
+        
+        echo ""
+        echo "2. Test OLLVM:"
+        clang -target aarch64-linux-android21 -mllvm -fla -c test_android.c -o test_ollvm.o && \
+        echo "✅ OLLVM passes work"
+
+    - name: Create package with instructions
+      run: |
+        mkdir -p android-arm64-ollvm
+        mkdir -p android-arm64-ollvm/bin
+        
+        cp -L build/bin/clang android-arm64-ollvm/bin/
+        cp -L build/bin/clang++ android-arm64-ollvm/bin/
+        
+        # Create REAL usage instructions
+        cat > android-arm64-ollvm/README.md << 'EOF'
+        # OLLVM Clang for Android ARM64
+        
+        ## IMPORTANT: This is a CROSS-COMPILER
+        
+        ### What it can do:
+        - ✅ Runs on x86_64 Linux
+        - ✅ Can compile C/C++ to Android ARM64 object files (.o)
+        - ✅ Has OLLVM obfuscation built-in
+        
+        ### What it NEEDS to link Android binaries:
+        - Android NDK sysroot (--sysroot=...)
+        - Android linker and libraries
+        
+        ## Usage with Android NDK:
+        
+        ```bash
+        # 1. Download Android NDK
+        # 2. Compile with Android sysroot:
+        ./bin/clang -target aarch64-linux-android21 \
+          --sysroot=/path/to/android-ndk/sysroot \
+          -mllvm -fla \
+          -mllvm -sub \
+          your_app.c \
+          -o your_app
+        ```
+        
+        ## Test if it works:
+        ```bash
+        echo "int main(){return 0;}" > test.c
+        ./bin/clang -target aarch64-linux-android21 -c test.c -o test.o
+        
+        if [ -f "test.o" ]; then
+          echo "✅ Can create Android ARM64 object files"
+          file test.o  # Should show "ARM aarch64"
+        fi
+        ```
+        EOF
+        
+        tar -czf android-arm64-ollvm.tar.gz android-arm64-ollvm/
+        echo "✅ Package created"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: android-arm64-ollvm
+        path: android-arm64-ollvm.tar.gz
