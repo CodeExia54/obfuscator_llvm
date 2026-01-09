@@ -53,16 +53,13 @@ jobs:
     - name: Verify cross-compiler architecture
       run: |
         echo "=== Checking clang binary ==="
-        file build/bin/clang
+        file -L build/bin/clang
         echo ""
         
         # It should say: "ELF 64-bit LSB executable, x86-64"
         # NOT "ARM aarch64"
         
-        echo "Clang is built for: $(file build/bin/clang | grep -o "x86-64\|ARM aarch64" || echo "unknown")"
-        echo ""
-        
-        if file build/bin/clang | grep -q "x86-64"; then
+        if file -L build/bin/clang | grep -q "x86-64"; then
           echo "✅ CORRECT: clang runs on x86_64 (host)"
         else
           echo "❌ WRONG: clang is not x86_64"
@@ -145,9 +142,9 @@ jobs:
         mkdir -p android-arm64-ollvm-cc
         mkdir -p android-arm64-ollvm-cc/bin
         
-        # Copy the cross-compiler
-        cp build/bin/clang android-arm64-ollvm-cc/bin/
-        cp build/bin/clang++ android-arm64-ollvm-cc/bin/
+        # Copy the cross-compiler (follow symlinks)
+        cp -L build/bin/clang android-arm64-ollvm-cc/bin/
+        cp -L build/bin/clang++ android-arm64-ollvm-cc/bin/
         
         # Create verification script
         cat > android-arm64-ollvm-cc/verify.sh << 'EOF'
