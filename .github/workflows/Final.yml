@@ -31,7 +31,9 @@ jobs:
           cmake \
           ninja-build \
           git \
-          python3
+          python3 \
+          clang \
+          lld
 
     - name: Download Android NDK (for sysroot)
       run: |
@@ -106,7 +108,8 @@ jobs:
         #include <stdio.h>
         
         int main() {
-            printf("Hello from Android ARM64!\n");
+            printf("Hello from Android ARM64!
+");
             return 0;
         }
         EOF
