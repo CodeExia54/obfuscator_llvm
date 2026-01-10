@@ -1,0 +1,115 @@
+name: Build Android OLLVM Compiler (AOSP-Compatible)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-android-ollvm:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout OLLVM
+      uses: actions/checkout@v4
+      with:
+        repository: sr-tream/obfuscator
+        ref: release/14.x
+        submodules: recursive
+
+    - name: Apply OLLVM patch
+      run: |
+        cd llvm-project
+        git apply --whitespace=nowarn ../obfuscator.patch || true
+
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          build-essential \
+          cmake \
+          ninja-build \
+          git \
+          python3 \
+          python3-pip \
+          clang \
+          lld \
+          zlib1g-dev \
+          libxml2-dev \
+          libncurses-dev \
+          binutils
+
+        sudo ln -sf /usr/bin/python3 /usr/bin/python
+
+    - name: Configure & Build OLLVM (AOSP-compatible)
+      run: |
+        mkdir build && cd build
+
+        cmake ../llvm-project/llvm \
+          -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLVM_ENABLE_PROJECTS="clang;lld;compiler-rt" \
+          -DLLVM_ENABLE_RUNTIMES="compiler-rt" \
+          -DLLVM_TARGETS_TO_BUILD="AArch64;X86" \
+          -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-android" \
+          -DLLVM_RUNTIME_TARGETS="aarch64-linux-android" \
+          -DANDROID=ON \
+          -DLLVM_ENABLE_ASSERTIONS=OFF \
+          -DLLVM_INCLUDE_TESTS=OFF \
+          -DLLVM_INCLUDE_EXAMPLES=OFF \
+          -DLLVM_BUILD_TOOLS=ON \
+          -DLLVM_ENABLE_TERMINFO=OFF \
+          -DCMAKE_C_COMPILER=clang \
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_ASM_COMPILER=clang
+
+        ninja -j$(nproc)
+
+    - name: Validate Clang (critical)
+      run: |
+        CLANG=build/bin/clang
+
+        echo "=== Clang version ==="
+        $CLANG --version
+
+        echo "=== Resource dir ==="
+        RES=$($CLANG -print-resource-dir)
+        echo "$RES"
+        test -d "$RES"
+
+        echo "=== Header sanity ==="
+        $CLANG -E - <<< '#include <stdarg.h>' >/dev/null
+        $CLANG -E - <<< '#include <stdbool.h>' >/dev/null
+        $CLANG -E - <<< '#include <stddef.h>'  >/dev/null
+
+        echo "✅ Builtin headers OK"
+
+    - name: Package compiler (AOSP layout)
+      run: |
+        CLANG_VER=$(ls build/lib/clang | head -1)
+
+        mkdir -p android-ollvm-arm64/bin
+        mkdir -p android-ollvm-arm64/lib/clang/$CLANG_VER
+
+        cp build/bin/clang android-ollvm-arm64/bin/
+        cp build/bin/clang++ android-ollvm-arm64/bin/
+        cp build/bin/lld android-ollvm-arm64/bin/ || true
+        cp build/bin/ld.lld android-ollvm-arm64/bin/ || true
+
+        for t in llvm-ar llvm-nm llvm-strip llvm-objcopy llvm-objdump llvm-readelf llvm-ranlib; do
+          [ -f build/bin/$t ] && cp build/bin/$t android-ollvm-arm64/bin/
+        done
+
+        # FULL resource dir (this is the key fix)
+        cp -r build/lib/clang/$CLANG_VER/* \
+              android-ollvm-arm64/lib/clang/$CLANG_VER/
+
+        tar -czf android-ollvm-arm64.tar.gz android-ollvm-arm64
+
+        echo "Package size:"
+        du -h android-ollvm-arm64.tar.gz
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: android-ollvm-aosp-compatible
+        path: android-ollvm-arm64.tar.gz
+        retention-days: 7
