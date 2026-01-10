@@ -6,35 +6,11 @@ on:
       build_lld:
         description: 'Build LLD linker'
         type: boolean
-        default: false
-      build_ar:
-        description: 'Build llvm-ar archiver'
+        default: true  # Changed to true
+      build_tools:
+        description: 'Build LLVM tools (ar, nm, strip, objcopy, etc.)'
         type: boolean
-        default: false
-      build_nm:
-        description: 'Build llvm-nm symbol lister'
-        type: boolean
-        default: false
-      build_strip_tool:
-        description: 'Build llvm-strip'
-        type: boolean
-        default: false
-      build_objcopy:
-        description: 'Build llvm-objcopy'
-        type: boolean
-        default: false
-      build_objdump:
-        description: 'Build llvm-objdump'
-        type: boolean
-        default: false
-      build_readelf:
-        description: 'Build llvm-readelf'
-        type: boolean
-        default: false
-      build_ranlib:
-        description: 'Build llvm-ranlib'
-        type: boolean
-        default: false
+        default: true
       strip_binaries:
         description: 'Strip binaries after build'
         type: boolean
@@ -94,52 +70,26 @@ jobs:
         
         echo "Building OLLVM for Android ARM64..."
         
+        # CORRECT: Only valid project names
         LLVM_PROJECTS="clang"
         
         if ${{ github.event.inputs.build_lld }}; then
           LLVM_PROJECTS="$LLVM_PROJECTS;lld"
         fi
         
-        if ${{ github.event.inputs.build_ar }}; then
-          LLVM_PROJECTS="$LLVM_PROJECTS;llvm-ar"
-        fi
-        
-        if ${{ github.event.inputs.build_nm }}; then
-          LLVM_PROJECTS="$LLVM_PROJECTS;llvm-nm"
-        fi
-        
-        if ${{ github.event.inputs.build_strip_tool }}; then
-          LLVM_PROJECTS="$LLVM_PROJECTS;llvm-strip"
-        fi
-        
-        if ${{ github.event.inputs.build_objcopy }}; then
-          LLVM_PROJECTS="$LLVM_PROJECTS;llvm-objcopy"
-        fi
-        
-        if ${{ github.event.inputs.build_objdump }}; then
-          LLVM_PROJECTS="$LLVM_PROJECTS;llvm-objdump"
-        fi
-        
-        if ${{ github.event.inputs.build_readelf }}; then
-          LLVM_PROJECTS="$LLVM_PROJECTS;llvm-readelf"
-        fi
-        
-        if ${{ github.event.inputs.build_ranlib }}; then
-          LLVM_PROJECTS="$LLVM_PROJECTS;llvm-ranlib"
-        fi
-        
         echo "Projects: $LLVM_PROJECTS"
         
+        # Build with tools enabled
         cmake ../llvm-project/llvm \
           -DCMAKE_BUILD_TYPE=Release \
           -DLLVM_ENABLE_PROJECTS="$LLVM_PROJECTS" \
           -DLLVM_TARGETS_TO_BUILD="AArch64;X86" \
           -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-unknown-linux-android" \
-          -DLLVM_ENABLE_LLD=ON \
+          -DLLVM_ENABLE_LLD=${{ github.event.inputs.build_lld && 'ON' || 'OFF' }} \
           -DLLVM_ENABLE_ASSERTIONS=OFF \
           -DLLVM_INCLUDE_TESTS=OFF \
           -DLLVM_INCLUDE_EXAMPLES=OFF \
-          -DLLVM_BUILD_TOOLS=ON \
+          -DLLVM_BUILD_TOOLS=${{ github.event.inputs.build_tools && 'ON' || 'OFF' }} \
           -DCMAKE_C_COMPILER=clang \
           -DCMAKE_CXX_COMPILER=clang++ \
           -DCMAKE_ASM_COMPILER=clang \
@@ -148,7 +98,8 @@ jobs:
         ninja -j$(nproc)
         
         echo "Build complete"
-        ls -1 bin/ | head -10
+        echo "Available binaries:"
+        ls -1 bin/ | head -20
 
     - name: Strip binaries
       if: ${{ github.event.inputs.strip_binaries }}
@@ -163,47 +114,20 @@ jobs:
           echo "Normal stripping"
         fi
         
-        BINARIES=("clang" "clang++")
-        
-        if ${{ github.event.inputs.build_lld }}; then
-          BINARIES+=("lld" "ld.lld")
-        fi
-        
-        if ${{ github.event.inputs.build_ar }}; then
-          BINARIES+=("llvm-ar")
-        fi
-        
-        if ${{ github.event.inputs.build_nm }}; then
-          BINARIES+=("llvm-nm")
-        fi
-        
-        if ${{ github.event.inputs.build_strip_tool }}; then
-          BINARIES+=("llvm-strip")
-        fi
-        
-        if ${{ github.event.inputs.build_objcopy }}; then
-          BINARIES+=("llvm-objcopy")
-        fi
-        
-        if ${{ github.event.inputs.build_objdump }}; then
-          BINARIES+=("llvm-objdump")
-        fi
-        
-        if ${{ github.event.inputs.build_readelf }}; then
-          BINARIES+=("llvm-readelf")
-        fi
-        
-        if ${{ github.event.inputs.build_ranlib }}; then
-          BINARIES+=("llvm-ranlib")
-        fi
+        # Find all binaries to strip
+        BINARIES=()
+        for bin in *; do
+          if [ -f "$bin" ] && [ -x "$bin" ] && file "$bin" | grep -q "ELF"; then
+            BINARIES+=("$bin")
+          fi
+        done
         
         echo "Stripping ${#BINARIES[@]} binaries"
         
         TOTAL_SAVED=0
         for binary in "${BINARIES[@]}"; do
-          if [ -f "$binary" ]; then
-            original=$(stat -c%s "$binary")
-            strip $STRIP_FLAGS "$binary" 2>/dev/null || continue
+          original=$(stat -c%s "$binary")
+          if strip $STRIP_FLAGS "$binary" 2>/dev/null; then
             stripped=$(stat -c%s "$binary")
             saved=$((original - stripped))
             TOTAL_SAVED=$((TOTAL_SAVED + saved))
@@ -221,42 +145,29 @@ jobs:
         
         echo "Creating package..."
         
-        cp -L build/bin/clang android-ollvm-arm64/bin/
-        cp -L build/bin/clang++ android-ollvm-arm64/bin/
+        # Copy compiler binaries
+        cp -L build/bin/clang android-ollvm-arm64/bin/ 2>/dev/null || true
+        cp -L build/bin/clang++ android-ollvm-arm64/bin/ 2>/dev/null || true
         
+        # Copy LLD if built
         if ${{ github.event.inputs.build_lld }}; then
           [ -f "build/bin/lld" ] && cp -L build/bin/lld android-ollvm-arm64/bin/
           [ -f "build/bin/ld.lld" ] && cp -L build/bin/ld.lld android-ollvm-arm64/bin/
         fi
         
-        if ${{ github.event.inputs.build_ar }} && [ -f "build/bin/llvm-ar" ]; then
-          cp -L build/bin/llvm-ar android-ollvm-arm64/bin/
+        # Copy LLVM tools if built
+        if ${{ github.event.inputs.build_tools }}; then
+          echo "Copying LLVM tools..."
+          TOOLS=("llvm-ar" "llvm-nm" "llvm-strip" "llvm-objcopy" "llvm-objdump" "llvm-readelf" "llvm-ranlib")
+          for tool in "${TOOLS[@]}"; do
+            if [ -f "build/bin/$tool" ]; then
+              cp -L "build/bin/$tool" "android-ollvm-arm64/bin/"
+              echo "  $tool"
+            fi
+          done
         fi
         
-        if ${{ github.event.inputs.build_nm }} && [ -f "build/bin/llvm-nm" ]; then
-          cp -L build/bin/llvm-nm android-ollvm-arm64/bin/
-        fi
-        
-        if ${{ github.event.inputs.build_strip_tool }} && [ -f "build/bin/llvm-strip" ]; then
-          cp -L build/bin/llvm-strip android-ollvm-arm64/bin/
-        fi
-        
-        if ${{ github.event.inputs.build_objcopy }} && [ -f "build/bin/llvm-objcopy" ]; then
-          cp -L build/bin/llvm-objcopy android-ollvm-arm64/bin/
-        fi
-        
-        if ${{ github.event.inputs.build_objdump }} && [ -f "build/bin/llvm-objdump" ]; then
-          cp -L build/bin/llvm-objdump android-ollvm-arm64/bin/
-        fi
-        
-        if ${{ github.event.inputs.build_readelf }} && [ -f "build/bin/llvm-readelf" ]; then
-          cp -L build/bin/llvm-readelf android-ollvm-arm64/bin/
-        fi
-        
-        if ${{ github.event.inputs.build_ranlib }} && [ -f "build/bin/llvm-ranlib" ]; then
-          cp -L build/bin/llvm-ranlib android-ollvm-arm64/bin/
-        fi
-        
+        # Copy runtime
         if [ -d "build/lib/clang" ]; then
           CLANG_VER=$(ls build/lib/clang/ | head -1)
           mkdir -p android-ollvm-arm64/lib/clang/$CLANG_VER
