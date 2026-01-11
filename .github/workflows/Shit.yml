@@ -1,0 +1,233 @@
+name: Build OLLVM Compiler for AOSP Kernels (ARM64) shit
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_lld:
+        description: 'Build LLD linker'
+        type: boolean
+        default: true
+      build_tools:
+        description: 'Build LLVM tools (ar, nm, strip, etc.)'
+        type: boolean
+        default: true
+      include_kernel_headers:
+        description: 'Include Linux kernel headers for AOSP'
+        type: boolean
+        default: false
+      kernel_version:
+        description: 'Linux kernel version for headers (optional)'
+        type: string
+        default: '5.15'
+
+env:
+  BUILD_THREADS: 4
+  TARGET_TRIPLE: "aarch64-linux-gnu"  # Generic Linux target, not Android-specific
+
+jobs:
+  build-aosp-kernel-ollvm:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: Checkout OLLVM LLVM 14
+      uses: actions/checkout@v4
+      with:
+        repository: sr-tream/obfuscator
+        ref: release/14.x
+        submodules: recursive
+
+    - name: Apply OLLVM patches
+      run: |
+        echo "=== Applying OLLVM patches ==="
+        cd llvm-project
+        
+        if [ -f "../obfuscator.patch" ]; then
+          echo "Applying OLLVM patch..."
+          patch -p1 --no-backup-if-mismatch < ../obfuscator.patch || {
+            echo "Patch application may have issues, continuing..."
+          }
+        fi
+        
+        # Verify OLLVM
+        if [ -d "llvm/lib/Transforms/Obfuscation" ]; then
+          echo "✅ OLLVM passes directory found"
+        fi
+
+    - name: Install build dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          build-essential \
+          cmake \
+          ninja-build \
+          git \
+          python3 \
+          python3-pip \
+          clang \
+          gcc-aarch64-linux-gnu \
+          g++-aarch64-linux-gnu \
+          libc6-dev-i386 \
+          zlib1g-dev \
+          binutils
+        
+        pip3 install pygments pyyaml
+
+    - name: Build OLLVM for AOSP Kernel
+      run: |
+        echo "=== Building OLLVM for AOSP Kernel Compilation ==="
+        
+        cd llvm-project
+        mkdir -p build
+        cd build
+        
+        # Clean build
+        rm -rf ./*
+        
+        # Configure projects
+        LLVM_PROJECTS="clang"
+        
+        if ${{ github.event.inputs.build_lld }}; then
+          LLVM_PROJECTS="$LLVM_PROJECTS;lld"
+        fi
+        
+        echo "Building projects: $LLVM_PROJECTS"
+        echo "Target triple: $TARGET_TRIPLE"
+        
+        # Build generic Linux compiler that can target Android
+        cmake ../llvm \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLVM_ENABLE_PROJECTS="$LLVM_PROJECTS" \
+          -DLLVM_TARGETS_TO_BUILD="AArch64" \
+          -DLLVM_DEFAULT_TARGET_TRIPLE="$TARGET_TRIPLE" \
+          -DLLVM_ENABLE_LLD=${{ github.event.inputs.build_lld && 'ON' || 'OFF' }} \
+          -DLLVM_ENABLE_ASSERTIONS=OFF \
+          -DLLVM_INCLUDE_TESTS=OFF \
+          -DLLVM_INCLUDE_EXAMPLES=OFF \
+          -DLLVM_BUILD_TOOLS=${{ github.event.inputs.build_tools && 'ON' || 'OFF' }} \
+          -DCMAKE_C_COMPILER=clang \
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_C_FLAGS="-O2" \
+          -DCMAKE_CXX_FLAGS="-O2" \
+          -G "Ninja"
+        
+        echo "Building..."
+        ninja -j$(nproc)
+        
+        # Verify
+        if [ -f "bin/clang" ]; then
+          echo "✅ Build successful"
+          
+          # Test basic AOSP kernel compilation
+          cat > /tmp/test_kernel.c << 'EOF'
+          #define __KERNEL__
+          int test_func(void) { return 42; }
+          EOF
+          
+          ./bin/clang --target=aarch64-linux-gnu \
+            -nostdinc \
+            -D__KERNEL__ \
+            -mgeneral-regs-only \
+            -c /tmp/test_kernel.c -o /tmp/test.o 2>&1 && \
+            echo "✅ AOSP kernel compilation works"
+            
+          # Test OLLVM
+          ./bin/clang -mllvm -help 2>&1 | grep -q -E "fla|sub|bcf" && \
+            echo "✅ OLLVM passes available"
+        fi
+
+    - name: Download Linux kernel headers (optional)
+      if: ${{ github.event.inputs.include_kernel_headers }}
+      run: |
+        echo "=== Downloading Linux kernel headers ==="
+        KERNEL_VERSION="${{ github.event.inputs.kernel_version }}"
+        
+        wget -q "https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-$KERNEL_VERSION.tar.xz"
+        tar -xf "linux-$KERNEL_VERSION.tar.xz"
+        
+        mkdir -p kernel-headers
+        cp -r "linux-$KERNEL_VERSION/include/linux" kernel-headers/ 2>/dev/null || true
+        cp -r "linux-$KERNEL_VERSION/arch/arm64/include/asm" kernel-headers/ 2>/dev/null || true
+
+    - name: Create AOSP Kernel OLLVM Toolchain
+      run: |
+        echo "=== Creating AOSP Kernel OLLVM Toolchain ==="
+        
+        cd llvm-project/build
+        
+        PACKAGE_NAME="aosp-kernel-ollvm-arm64"
+        mkdir -p $PACKAGE_NAME/bin
+        
+        # Copy binaries
+        cp -L bin/clang $PACKAGE_NAME/bin/
+        cp -L bin/clang++ $PACKAGE_NAME/bin/
+        
+        # Create AOSP-style symlinks
+        cd $PACKAGE_NAME/bin
+        ln -sf clang aarch64-linux-gnu-clang
+        ln -sf clang aarch64-linux-android-clang  # For AOSP compatibility
+        ln -sf clang++ aarch64-linux-gnu-clang++
+        ln -sf clang++ aarch64-linux-android-clang++
+        
+        # Copy LLD
+        if ${{ github.event.inputs.build_lld }}; then
+          [ -f "../../bin/lld" ] && cp -L ../../bin/lld .
+          ln -sf lld aarch64-linux-gnu-ld
+          ln -sf lld aarch64-linux-android-ld
+        fi
+        
+        # Copy tools
+        if ${{ github.event.inputs.build_tools }}; then
+          TOOLS=("llvm-ar" "llvm-nm" "llvm-strip" "llvm-objcopy")
+          for tool in "${TOOLS[@]}"; do
+            [ -f "../../bin/$tool" ] && cp -L "../../bin/$tool" .
+            tool_name="${tool#llvm-}"
+            ln -sf "$tool" "aarch64-linux-gnu-$tool_name"
+            ln -sf "$tool" "aarch64-linux-android-$tool_name"
+          done
+        fi
+        
+        # Create setup script
+        cd ../..
+        cat > $PACKAGE_NAME/setup.sh << 'EOF'
+        #!/bin/bash
+        # AOSP Kernel OLLVM Toolchain Setup
+        
+        TOOLCHAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        export PATH="$TOOLCHAIN_DIR/bin:$PATH"
+        
+        # AOSP kernel compilation environment
+        export ARCH="arm64"
+        export CROSS_COMPILE="aarch64-linux-gnu-"
+        export CC="clang"
+        export LLVM=1
+        export LLVM_IAS=1
+        
+        # AOSP kernel compilation flags
+        export AOSP_KERNEL_FLAGS="--target=aarch64-linux-gnu \
+                                 -nostdinc \
+                                 -mgeneral-regs-only \
+                                 -ffixed-x18"
+        
+        # OLLVM flags
+        export OLLVM_FLAGS="-mllvm -fla -mllvm -sub -mllvm -bcf"
+        
+        echo "Toolchain ready for AOSP kernel compilation"
+        echo "Usage: make ARCH=arm64 CC=\"clang\" KCFLAGS=\"\$AOSP_KERNEL_FLAGS \$OLLVM_FLAGS\""
+        EOF
+        
+        chmod +x $PACKAGE_NAME/setup.sh
+        
+        # Add headers if available
+        if [ -d "../../kernel-headers" ] && ${{ github.event.inputs.include_kernel_headers }}; then
+          cp -r ../../kernel-headers $PACKAGE_NAME/
+        fi
+        
+        # Package
+        tar -czf $PACKAGE_NAME.tar.gz $PACKAGE_NAME/
+        echo "Package: $PACKAGE_NAME.tar.gz"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: aosp-kernel-ollvm-compiler
+        path: llvm-project/build/*.tar.gz
