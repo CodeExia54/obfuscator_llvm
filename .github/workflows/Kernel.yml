@@ -1,4 +1,4 @@
-name: Build Android Kernel OLLVM Compiler ARM64 GNU
+name: Build Android Kernel ARM64 GNU hkh
 
 on:
   workflow_dispatch:
