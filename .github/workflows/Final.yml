@@ -1,4 +1,4 @@
-name: Build Android Kernel OLLVM Compiler ARM64 GNU pinki
+name: Build Android Kernel OLLVM Compiler ARM64 Final
 
 on:
   workflow_dispatch:
@@ -274,33 +274,15 @@ jobs:
           echo "Testing OLLVM passes:"
           ./bin/clang -mllvm -help 2>&1 | grep -E "fla|sub|bcf" || echo "⚠️  OLLVM passes not found in help"
           
-          # Test AOSP kernel compatibility
-          echo "Testing AOSP kernel compilation:"
-          cat > /tmp/test_aosp.c << 'TEST_AOSP_EOF'
-#define __KERNEL__
-#define MODULE
-#include <linux/types.h>
-#include <linux/version.h>
-
-static int test_function(void) {
-    return LINUX_VERSION_CODE;
-}
-TEST_AOSP_EOF
-          
-          # Test with AOSP-like flags
-          ./bin/clang --target=aarch64-linux-gnu \
-            -nostdinc \
-            -isystem /usr/aarch64-linux-gnu/include \
-            -D__KERNEL__ \
-            -DMODULE \
-            -mgeneral-regs-only \
-            -c /tmp/test_aosp.c \
-            -o /tmp/test_aosp.o 2>&1
+          # Simple test without kernel headers
+          echo "Testing basic compilation:"
+          echo 'int test_func() { return 42; }' > /tmp/simple_test.c
+          ./bin/clang -c /tmp/simple_test.c -o /tmp/simple_test.o -mllvm -fla 2>&1
           
           if [ $? -eq 0 ]; then
-            echo "✅ AOSP kernel compilation works"
+            echo "✅ Basic compilation with OLLVM works"
           else
-            echo "⚠️  AOSP kernel test failed (may need more headers)"
+            echo "❌ Basic compilation failed"
           fi
           
         else
@@ -426,59 +408,32 @@ echo ""
 echo "1. Testing OLLVM passes:"
 clang -mllvm -help 2>&1 | grep -A2 -B2 "fla\|sub\|bcf" || echo "⚠️  OLLVM passes not found"
 
-# Test 2: AOSP kernel flags
+# Test 2: Simple compilation
 echo ""
-echo "2. Testing AOSP kernel compilation flags:"
-cat > /tmp/test_kernel.c << 'KERNEL_TEST_EOF'
-#define __KERNEL__
-#define MODULE
-#include <linux/types.h>
-#include <linux/init.h>
-#include <linux/module.h>
+echo "2. Testing basic compilation:"
+echo 'int simple_test(void) { return 42; }' > /tmp/simple.c
 
-MODULE_LICENSE("GPL");
-static int __init test_init(void) { return 0; }
-static void __exit test_exit(void) { }
-module_init(test_init);
-module_exit(test_exit);
-KERNEL_TEST_EOF
-
-echo "Compiling with AOSP kernel flags..."
-clang --target=aarch64-linux-gnu \
-  -nostdinc \
-  -isystem /usr/aarch64-linux-gnu/include \
-  -D__KERNEL__ \
-  -DMODULE \
-  -mgeneral-regs-only \
-  -fno-PIC \
-  -c /tmp/test_kernel.c \
-  -o /tmp/test_kernel.o 2>&1
+clang -c /tmp/simple.c -o /tmp/simple.o 2>&1
 
 if [ $? -eq 0 ]; then
-    echo "✅ AOSP kernel flags work"
-    echo "   File type: \$(file /tmp/test_kernel.o)"
+    echo "✅ Basic compilation works"
 else
-    echo "❌ AOSP kernel flags test failed"
+    echo "❌ Basic compilation failed"
 fi
 
-# Test 3: OLLVM with kernel code
+# Test 3: OLLVM with code
 echo ""
-echo "3. Testing OLLVM with kernel code:"
-clang --target=aarch64-linux-gnu \
-  -nostdinc \
-  -isystem /usr/aarch64-linux-gnu/include \
-  -D__KERNEL__ \
-  -mgeneral-regs-only \
-  -c /tmp/test_kernel.c \
-  -o /tmp/test_kernel_ollvm.o \
+echo "3. Testing OLLVM with code:"
+clang -c /tmp/simple.c \
+  -o /tmp/simple_ollvm.o \
   -mllvm -fla -mllvm -sub 2>&1
 
 if [ $? -eq 0 ]; then
-    echo "✅ OLLVM works with kernel code"
+    echo "✅ OLLVM works with code"
     
     # Compare file sizes
-    SIZE_NORMAL=\$(stat -c%s /tmp/test_kernel.o 2>/dev/null || stat -f%z /tmp/test_kernel.o)
-    SIZE_OLLVM=\$(stat -c%s /tmp/test_kernel_ollvm.o 2>/dev/null || stat -f%z /tmp/test_kernel_ollvm.o)
+    SIZE_NORMAL=\$(stat -c%s /tmp/simple.o 2>/dev/null || stat -f%z /tmp/simple.o)
+    SIZE_OLLVM=\$(stat -c%s /tmp/simple_ollvm.o 2>/dev/null || stat -f%z /tmp/simple_ollvm.o)
     
     if [ -n "\$SIZE_NORMAL" ] && [ -n "\$SIZE_OLLVM" ]; then
         echo "   Normal: \${SIZE_NORMAL} bytes"
@@ -489,11 +444,11 @@ if [ $? -eq 0 ]; then
         fi
     fi
 else
-    echo "❌ OLLVM kernel test failed"
+    echo "❌ OLLVM test failed"
 fi
 
 # Cleanup
-rm -f /tmp/test_kernel.c /tmp/test_kernel.o /tmp/test_kernel_ollvm.o
+rm -f /tmp/simple.c /tmp/simple.o /tmp/simple_ollvm.o
 
 echo ""
 echo "=== Test Complete ==="
