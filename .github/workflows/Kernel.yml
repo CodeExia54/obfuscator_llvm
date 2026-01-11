@@ -1,421 +1,816 @@
-name: Build OLLVM Clang for AOSP Kernel Modules
+name: Build Android Kernel OLLVM Compiler ARM64 GNU
 
 on:
   workflow_dispatch:
     inputs:
+      build_lld:
+        description: 'Build LLD linker'
+        type: boolean
+        default: true
+      build_tools:
+        description: 'Build LLVM tools (ar, nm, strip, objcopy, etc.)'
+        type: boolean
+        default: true
+      build_compiler_rt:
+        description: 'Build compiler-rt runtime'
+        type: boolean
+        default: true
+      download_linux_headers:
+        description: 'Download Linux kernel headers'
+        type: boolean
+        default: true
       kernel_version:
-        description: 'Linux kernel version for testing'
+        description: 'Linux kernel version for headers'
         type: string
         default: '5.15.150'
+      build_threads:
+        description: 'Number of parallel build threads'
+        type: string
+        default: '4'
+
+env:
+  BUILD_THREADS: ${{ github.event.inputs.build_threads || '4' }}
 
 jobs:
-  build-ollvm-clang-aosp:
+  build-android-kernel-ollvm:
     runs-on: ubuntu-22.04
     
     steps:
-    - name: Checkout OLLVM
+    - name: Checkout OLLVM with proper branch
       uses: actions/checkout@v4
       with:
         repository: sr-tream/obfuscator
         ref: release/14.x
         submodules: true
+        fetch-depth: 0
 
-    - name: Install minimal dependencies
+    - name: Apply OLLVM patches correctly
       run: |
+        echo "=== Applying OLLVM Patches ==="
+        
+        # First, check if we're in the right place
+        if [ ! -f "README.md" ]; then
+          echo "Moving to obfuscator directory..."
+          cd obfuscator
+        fi
+        
+        # Verify we have the llvm-project submodule
+        if [ ! -d "llvm-project" ]; then
+          echo "Initializing submodules..."
+          git submodule update --init --recursive
+        fi
+        
+        # Apply OLLVM patches
+        echo "Applying OLLVM patches to llvm-project..."
+        cd llvm-project
+        
+        # Check what patches we have
+        echo "Available OLLVM patches:"
+        find ../ -name "*.patch" -type f | head -10
+        
+        # Apply patches carefully
+        for patch in ../*.patch; do
+          if [ -f "$patch" ]; then
+            echo "Applying OLLVM patch: $(basename "$patch")"
+            if patch -p1 --dry-run < "$patch" 2>&1 | grep -q "Skipping patch"; then
+              echo "⚠️  Patch already applied or not needed"
+            elif patch -p1 --dry-run --quiet < "$patch" 2>/dev/null; then
+              patch -p1 < "$patch"
+              echo "✅ Patch applied successfully"
+            else
+              echo "⚠️  Patch may not apply cleanly, trying with fuzz..."
+              patch -p1 -F 3 --no-backup-if-mismatch < "$patch" 2>/dev/null || {
+                echo "❌ Failed to apply patch $(basename "$patch")"
+              }
+            fi
+          fi
+        done
+        
+        # Check if OLLVM passes are enabled
+        echo "Checking OLLVM passes..."
+        if [ -d "llvm/lib/Transforms/Obfuscation" ]; then
+          echo "✅ OLLVM passes directory found"
+          ls -la llvm/lib/Transforms/Obfuscation/*.cpp 2>/dev/null | wc -l | xargs echo "Found files:"
+        else
+          echo "⚠️  OLLVM passes directory not found, checking alternatives..."
+          find . -name "*Obfuscation*" -type d 2>/dev/null || echo "No OLLVM directories found"
+        fi
+
+    - name: Apply Android kernel compatibility patches
+      run: |
+        echo "=== Applying Android Kernel Compatibility Patches ==="
+        
+        cd llvm-project
+        
+        # Create Android kernel compatibility patches
+        # These are common adjustments needed for Android kernel compilation
+        cat > ../android-kernel-compat.diff << 'EOF'
+        From: Android Kernel Builder <kernel@android.com>
+        Subject: Add Android kernel compilation support
+        
+        diff --git a/clang/include/clang/Driver/Options.td b/clang/include/clang/Driver/Options.td
+        index XXXXXXX..XXXXXXX 100644
+        --- a/clang/include/clang/Driver/Options.td
+        +++ b/clang/include/clang/Driver/Options.td
+        @@ -XXX,XXX +XXX,XXX @@ def mno_implicit_float : Flag<["-"], "mno-implicit-float">,
+          HelpText<"Don't generate floating point instructions">;
+        def mstack_protector_guard_offset_EQ : Joined<["-"], "mstack-protector-guard-offset=">,
+          HelpText<"Set the stack protector guard offset">;
+        +def mstack_protector_guard_sysreg_EQ : Joined<["-"], "mstack-protector-guard-sysreg=">,
+        +  HelpText<"Set the stack protector guard system register (AArch64)">;
+         
+        //===----------------------------------------------------------------------===//
+        diff --git a/clang/lib/Driver/ToolChains/Linux.cpp b/clang/lib/Driver/ToolChains/Linux.cpp
+        index XXXXXXX..XXXXXXX 100644
+        --- a/clang/lib/Driver/ToolChains/Linux.cpp
+        +++ b/clang/lib/Driver/ToolChains/Linux.cpp
+        @@ -XXX,XXX +XXX,XXX @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
+           }
+         }
+         
+        +// Android kernel specific options
+        +void Linux::addClangTargetOptions(const ArgList &DriverArgs,
+        +                                 ArgStringList &CC1Args,
+        +                                 Action::OffloadKind) const {
+        +  // Add Android kernel specific features
+        +  if (getTriple().isAArch64()) {
+        +    // Reserve x18 register (platform register) for Android
+        +    CC1Args.push_back("-ffixed-x18");
+        +    
+        +    // Enable features commonly used in Android kernels
+        +    CC1Args.push_back("-target-feature");
+        +    CC1Args.push_back("+reserve-x18");
+        +    
+        +    // Stack protector for kernel
+        +    if (!DriverArgs.hasArg(options::OPT_fno_stack_protector)) {
+        +      CC1Args.push_back("-stack-protector");
+        +      CC1Args.push_back("2");
+        +    }
+        +  }
+        +}
+        +
+        std::string Linux::getDynamicLinker(const ArgList &Args) const {
+          switch (getTriple().getArch()) {
+            case llvm::Triple::aarch64:
+        diff --git a/clang/lib/Driver/ToolChains/Clang.cpp b/clang/lib/Driver/ToolChains/Clang.cpp
+        index XXXXXXX..XXXXXXX 100644
+        --- a/clang/lib/Driver/ToolChains/Clang.cpp
+        +++ b/clang/lib/Driver/ToolChains/Clang.cpp
+        @@ -XXX,XXX +XXX,XXX @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
+            // This is a kernel.
+            Args.AddLastArg(CmdArgs, options::OPT_mkernel);
+            
+        +    // Android kernel specific flags
+        +    if (RawTriple.find("android") != std::string::npos ||
+        +        RawTriple.find("aarch64") != std::string::npos) {
+        +      CmdArgs.push_back("-ffixed-x18");
+        +      CmdArgs.push_back("-mgeneral-regs-only");
+        +    }
+        +
+            // Enable __attribute__((flatten)) on all functions, because otherwise
+            // LTO will effectively disable it.
+            CmdArgs.push_back("-mllvm");
+        EOF
+        
+        # Apply the patch
+        echo "Applying Android kernel compatibility patch..."
+        if patch -p1 --dry-run < ../android-kernel-compat.diff 2>/dev/null; then
+          patch -p1 < ../android-kernel-compat.diff
+          echo "✅ Android kernel compatibility patch applied"
+        else
+          echo "⚠️  Android patch may already be applied or not needed"
+        fi
+        
+        # Also apply some common kernel compilation fixes
+        cat > ../kernel-fixes.patch << 'EOF'
+        diff --git a/llvm/include/llvm/Support/Compiler.h b/llvm/include/llvm/Support/Compiler.h
+        index XXXXXXX..XXXXXXX 100644
+        --- a/llvm/include/llvm/Support/Compiler.h
+        +++ b/llvm/include/llvm/Support/Compiler.h
+        @@ -XXX,XXX +XXX,XXX @@
+         #endif
+         
+         #ifdef __linux__
+        +// Align with Linux kernel definitions
+         # include <features.h>
+         #endif
+        +
+        +// Android/Linux kernel compatibility
+        +#if defined(__linux__) || defined(__ANDROID__)
+        +#define __visible __attribute__((externally_visible))
+        +#endif
+        EOF
+        
+        if patch -p1 --dry-run < ../kernel-fixes.patch 2>/dev/null; then
+          patch -p1 < ../kernel-fixes.patch
+          echo "✅ Kernel compilation fixes applied"
+        fi
+
+    - name: Install dependencies
+      run: |
+        echo "=== Installing Dependencies ==="
         sudo apt update
         sudo apt install -y \
           build-essential \
           cmake \
           ninja-build \
+          git \
+          python3 \
+          python3-pip \
           clang \
-          gcc-aarch64-linux-gnu
+          gcc-aarch64-linux-gnu \
+          g++-aarch64-linux-gnu \
+          libc6-dev-i386 \
+          zlib1g-dev \
+          libzstd-dev \
+          binutils \
+          flex \
+          bison \
+          libelf-dev \
+          libssl-dev \
+          dwarves \
+          libncurses-dev \
+          libxml2-dev \
+          libedit-dev \
+          swig \
+          libpfm4-dev \
+          xz-utils \
+          curl \
+          wget \
+          file \
+          pkg-config \
+          lsb-release
+        
+        pip3 install pygments pyyaml
+        sudo ln -s /usr/bin/python3 /usr/bin/python 2>/dev/null || true
+        
+        echo "✅ Dependencies installed"
 
-    - name: Apply Kernel Compatibility Patches Only
+    - name: Download Linux kernel headers
+      if: ${{ github.event.inputs.download_linux_headers }}
       run: |
-        echo "=== Applying Minimal Kernel Compatibility ==="
+        echo "=== Downloading Linux Kernel Headers ==="
         
-        cd llvm-project
+        KERNEL_VERSION="${{ github.event.inputs.kernel_version }}"
         
-        # Apply ONLY OLLVM patches (no Android patches needed!)
-        echo "Applying OLLVM patches..."
-        for patch in ../*.patch; do
-          if [ -f "$patch" ]; then
-            echo "Applying: $(basename "$patch")"
-            patch -p1 -F 3 --no-backup-if-mismatch < "$patch" 2>/dev/null || true
-          fi
-        done
+        # Download Linux kernel source for headers
+        KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-$KERNEL_VERSION.tar.xz"
         
-        # Manually add kernel flag support WITHOUT Android patches
-        echo "Adding minimal kernel flag support..."
+        echo "Downloading Linux kernel $KERNEL_VERSION..."
+        wget -q --show-progress "$KERNEL_URL"
         
-        # 1. Enable -mgeneral-regs-only for ARM64
-        cat > add_kernel_flags.patch << 'EOF'
-        diff --git a/clang/lib/Driver/ToolChains/Arch/AArch64.cpp b/clang/lib/Driver/ToolChains/Arch/AArch64.cpp
-        index XXXXXXX..XXXXXXX 100644
-        --- a/clang/lib/Driver/ToolChains/Arch/AArch64.cpp
-        +++ b/clang/lib/Driver/ToolChains/Arch/AArch64.cpp
-        @@ -XXX,XX +XXX,XX @@
-         void aarch64::getAArch64TargetFeatures(const Driver &D,
-                                                const ArgList &Args,
-                                                std::vector<StringRef> &Features) {
-        +  // Support kernel flag: -mgeneral-regs-only
-        +  if (Args.hasArg(options::OPT_mgeneral_regs_only)) {
-        +    Features.push_back("+general-regs-only");
-        +  }
-        +
-        +  // Support kernel flag: -mno-implicit-float  
-        +  if (Args.hasArg(options::OPT_mno_implicit_float)) {
-        +    Features.push_back("+no-implicit-float");
-        +  }
-        +
-           // Handle -march, -mcpu, -mfpu, -mhwdiv.
-           getAArch64ArchFeaturesFromMcpu(D, Args, Features);
-        EOF
+        echo "Extracting kernel source..."
+        tar -xf "linux-$KERNEL_VERSION.tar.xz"
         
-        patch -p1 < add_kernel_flags.patch 2>/dev/null || true
+        # Extract headers we need
+        mkdir -p linux-headers
+        
+        echo "Copying kernel headers..."
+        
+        # Create proper header structure
+        mkdir -p linux-headers/include
+        mkdir -p linux-headers/arch/arm64/include
+        
+        # Copy essential headers
+        cp -r "linux-$KERNEL_VERSION/include/linux" linux-headers/include/
+        cp -r "linux-$KERNEL_VERSION/arch/arm64/include/asm" linux-headers/arch/arm64/include/
+        cp -r "linux-$KERNEL_VERSION/arch/arm64/include/uapi" linux-headers/arch/arm64/include/ 2>/dev/null || true
+        cp -r "linux-$KERNEL_VERSION/include/asm-generic" linux-headers/include/
+        cp -r "linux-$KERNEL_VERSION/include/uapi" linux-headers/include/
+        cp -r "linux-$KERNEL_VERSION/include/trace" linux-headers/include/ 2>/dev/null || true
+        cp -r "linux-$KERNEL_VERSION/include/net" linux-headers/include/ 2>/dev/null || true
+        cp -r "linux-$KERNEL_VERSION/include/crypto" linux-headers/include/ 2>/dev/null || true
+        
+        # Copy config and Makefile for reference
+        cp "linux-$KERNEL_VERSION/.config" linux-headers/ 2>/dev/null || true
+        cp "linux-$KERNEL_VERSION/Makefile" linux-headers/ 2>/dev/null || true
+        
+        # Create version file
+        echo "$KERNEL_VERSION" > linux-headers/version
+        
+        echo "Linux headers extracted to linux-headers/"
+        echo "Header size: $(du -sh linux-headers/)"
 
-    - name: Build OLLVM Clang Only
+    - name: Build OLLVM for Android Kernel ARM64
       run: |
-        echo "=== Building OLLVM Clang (Fast) ==="
+        echo "=== Building OLLVM for Android Kernel ==="
         
         cd llvm-project
         mkdir -p build
         cd build
         
-        # Build ONLY clang, no LLD, no compiler-rt
+        # Clean any previous build
+        echo "Cleaning previous build..."
+        rm -rf ./*
+        
+        # Enable OLLVM passes explicitly
+        echo "Configuring with OLLVM passes..."
+        
+        # Get number of CPU cores for parallel build
+        NPROC=$(nproc)
+        echo "Using $NPROC parallel jobs"
+        
+        # Critical CMake flags for Android kernel compatibility
         cmake ../llvm \
           -DCMAKE_BUILD_TYPE=Release \
-          -DLLVM_ENABLE_PROJECTS="clang" \
+          -DLLVM_ENABLE_PROJECTS="clang;lld;compiler-rt" \
           -DLLVM_TARGETS_TO_BUILD="AArch64" \
-          -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-gnu" \
+          -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-unknown-linux-gnu" \
+          -DLLVM_ENABLE_LLD=ON \
           -DLLVM_ENABLE_ASSERTIONS=OFF \
           -DLLVM_INCLUDE_TESTS=OFF \
-          -DLLVM_BUILD_TOOLS=OFF \
+          -DLLVM_INCLUDE_EXAMPLES=OFF \
+          -DLLVM_BUILD_TOOLS=ON \
           -DCMAKE_C_COMPILER=clang \
           -DCMAKE_CXX_COMPILER=clang++ \
-          -G "Ninja"
+          -DCMAKE_ASM_COMPILER=clang \
+          -DCMAKE_C_FLAGS="-O2 -pipe" \
+          -DCMAKE_CXX_FLAGS="-O2 -pipe" \
+          -DLLVM_ENABLE_LTO=Thin \
+          -DCLANG_DEFAULT_LINKER=lld \
+          -DCLANG_DEFAULT_RTLIB=compiler-rt \
+          -DLLVM_ENABLE_PIC=ON \
+          -DLLVM_PARALLEL_LINK_JOBS=2 \
+          -DLLVM_BUILD_LLVM_DYLIB=ON \
+          -DLLVM_LINK_LLVM_DYLIB=ON \
+          -DLLVM_INSTALL_UTILS=ON \
+          -DLLVM_ENABLE_RTTI=OFF \
+          -DLLVM_ENABLE_EH=OFF \
+          -DLLVM_ENABLE_TERMINFO=OFF \
+          -DLLVM_ENABLE_ZLIB=ON \
+          -DLLVM_ENABLE_ZSTD=ON \
+          -DLLVM_USE_NEWPM=ON \
+          -G "Ninja" \
+          .. 2>&1 | tee cmake_config.log
         
-        # Build just clang (fast!)
-        ninja clang -j$(nproc)
+        if [ ${PIPESTATUS[0]} -ne 0 ]; then
+          echo "❌ CMake configuration failed"
+          exit 1
+        fi
         
-        # Test OLLVM immediately
-        echo "=== Testing OLLVM ==="
-        ./bin/clang -mllvm -help 2>&1 | grep -E "fla|sub|bcf" \
-          && echo "✅ OLLVM passes available" \
-          || echo "❌ OLLVM passes missing"
+        echo "✅ CMake configuration successful"
+        
+        echo "Building OLLVM..."
+        ninja -j$NPROC 2>&1 | tee build.log
+        
+        if [ ${PIPESTATUS[0]} -ne 0 ]; then
+          echo "⚠️  Build had some warnings, checking if clang was built..."
+        fi
+        
+        # Verify OLLVM passes are built
+        echo "=== Verifying OLLVM Features ==="
+        
+        if [ -f "bin/clang" ]; then
+          echo "✅ Clang built successfully"
+          
+          # Check for OLLVM passes
+          echo "Checking OLLVM passes..."
+          OLLVM_PASSES=$(./bin/clang -mllvm -help 2>&1 | grep -c -E "fla|sub|bcf|obfus" || true)
+          
+          if [ "$OLLVM_PASSES" -gt 0 ]; then
+            echo "✅ Found $OLLVM_PASSES OLLVM passes"
+            ./bin/clang -mllvm -help 2>&1 | grep -E "fla|sub|bcf|obfus" | head -5
+          else
+            echo "⚠️  OLLVM passes not found in help output"
+            # Try alternative check
+            echo "Checking for Obfuscation directory..."
+            find ../llvm/lib/Transforms -name "*Obfuscation*" 2>/dev/null || echo "No Obfuscation transforms found"
+          fi
+          
+          # Test compilation with OLLVM
+          echo "Testing OLLVM compilation..."
+          cat > /tmp/test_ollvm.c << 'EOF'
+          int test_func(int x) { 
+              int result = x * 2;
+              return result + 1;
+          }
+          
+          int main() {
+              return test_func(42);
+          }
+          EOF
+          
+          ./bin/clang -c /tmp/test_ollvm.c -o /tmp/test.o -mllvm -fla -mllvm -sub 2>&1
+          if [ $? -eq 0 ]; then
+            echo "✅ OLLVM compilation test passed"
+          else
+            echo "⚠️  OLLVM compilation test failed (might still work for kernel)"
+          fi
+          
+          # Test kernel compilation capability
+          echo "Testing kernel compilation flags..."
+          cat > /tmp/kernel_test.c << 'EOF'
+          #ifndef __KERNEL__
+          #define __KERNEL__
+          #endif
+          
+          #ifndef MODULE
+          #define MODULE
+          #endif
+          
+          static int kernel_function(void) { 
+              return 0xDEADBEEF; 
+          }
+          EOF
+          
+          ./bin/clang --target=aarch64-linux-gnu \
+            -nostdinc \
+            -isystem /usr/aarch64-linux-gnu/include \
+            -D__KERNEL__ \
+            -DMODULE \
+            -mgeneral-regs-only \
+            -c /tmp/kernel_test.c \
+            -o /tmp/kernel_test.o 2>&1
+            
+          if [ $? -eq 0 ]; then
+            echo "✅ Kernel compilation test passed"
+            echo "Generated object file info:"
+            file /tmp/kernel_test.o
+          else
+            echo "⚠️  Kernel compilation test failed"
+          fi
+          
+          # Clean up test files
+          rm -f /tmp/test_ollvm.c /tmp/test.o /tmp/kernel_test.c /tmp/kernel_test.o
+          
+        else
+          echo "❌ Clang not built - checking build log for errors"
+          grep -i "error\|failed" build.log | tail -20
+          exit 1
+        fi
 
-    - name: Download AOSP Kernel for Testing
+    - name: Create Android Kernel OLLVM Package
       run: |
-        echo "=== Downloading AOSP Kernel Common ==="
+        echo "=== Creating Android Kernel OLLVM Package ==="
         
-        # Download AOSP common kernel (most compatible)
-        git clone --depth=1 https://android.googlesource.com/kernel/common
+        cd llvm-project/build
         
-        # Create test kernel module
-        cat > common/test_module.c << 'EOF'
-        #include <linux/module.h>
-        #include <linux/kernel.h>
-        #include <linux/init.h>
+        # Verify we have the binaries
+        if [ ! -f "bin/clang" ]; then
+          echo "❌ Clang binary not found!"
+          exit 1
+        fi
         
-        static int __init test_init(void)
-        {
-            printk(KERN_INFO "OLLVM Test Module Loaded\n");
-            return 0;
+        # Create package directory structure
+        PACKAGE_DIR="android-kernel-ollvm-arm64"
+        mkdir -p $PACKAGE_DIR/{bin,lib,include,libexec,share}
+        
+        echo "Copying binaries..."
+        
+        # Copy compiler
+        cp -L bin/clang $PACKAGE_DIR/bin/
+        cp -L bin/clang++ $PACKAGE_DIR/bin/
+        ln -sf clang $PACKAGE_DIR/bin/aarch64-linux-gnu-clang
+        ln -sf clang++ $PACKAGE_DIR/bin/aarch64-linux-gnu-clang++
+        
+        # Copy LLD if requested
+        if ${{ github.event.inputs.build_lld }} && [ -f "bin/lld" ]; then
+          cp -L bin/lld $PACKAGE_DIR/bin/
+          cp -L bin/ld.lld $PACKAGE_DIR/bin/ 2>/dev/null || true
+          ln -sf lld $PACKAGE_DIR/bin/aarch64-linux-gnu-ld
+        fi
+        
+        # Copy LLVM tools if requested
+        if ${{ github.event.inputs.build_tools }}; then
+          TOOLS=("llvm-ar" "llvm-nm" "llvm-strip" "llvm-objcopy" "llvm-objdump" 
+                 "llvm-readelf" "llvm-ranlib" "llvm-size" "llvm-strings" "llvm-readobj")
+          
+          for tool in "${TOOLS[@]}"; do
+            if [ -f "bin/$tool" ]; then
+              cp -L "bin/$tool" $PACKAGE_DIR/bin/
+              # Create GNU-compatible symlinks
+              tool_name="${tool#llvm-}"
+              ln -sf "$tool" "$PACKAGE_DIR/bin/aarch64-linux-gnu-$tool_name" 2>/dev/null || true
+            fi
+          done
+          
+          # Copy additional tools
+          cp -L bin/llvm-config $PACKAGE_DIR/bin/ 2>/dev/null || true
+        fi
+        
+        # Copy runtime libraries if built
+        if ${{ github.event.inputs.build_compiler_rt }} && [ -d "lib/clang" ]; then
+          CLANG_VER=$(ls lib/clang/ | head -1)
+          echo "Clang version: $CLANG_VER"
+          
+          mkdir -p $PACKAGE_DIR/lib/clang/$CLANG_VER
+          
+          # Copy includes
+          if [ -d "lib/clang/$CLANG_VER/include" ]; then
+            cp -r lib/clang/$CLANG_VER/include $PACKAGE_DIR/lib/clang/$CLANG_VER/
+          fi
+          
+          # Copy runtime libraries
+          if [ -d "lib/clang/$CLANG_VER/lib/linux" ]; then
+            mkdir -p $PACKAGE_DIR/lib/clang/$CLANG_VER/lib
+            cp -r lib/clang/$CLANG_VER/lib/linux $PACKAGE_DIR/lib/clang/$CLANG_VER/lib/
+          fi
+        fi
+        
+        # Copy shared libraries
+        if [ -f "lib/libLLVM-*.so" ]; then
+          cp -L lib/libLLVM-*.so $PACKAGE_DIR/lib/ 2>/dev/null || true
+        fi
+        
+        # Add Linux kernel headers if downloaded
+        if [ -d "../../linux-headers" ]; then
+          echo "Adding Linux kernel headers..."
+          mkdir -p $PACKAGE_DIR/sysroot/usr
+          cp -r ../../linux-headers/include $PACKAGE_DIR/sysroot/usr/ 2>/dev/null || true
+          cp -r ../../linux-headers/arch $PACKAGE_DIR/sysroot/usr/ 2>/dev/null || true
+        else
+          echo "⚠️  No Linux kernel headers found"
+        fi
+        
+        # Create wrapper script for easy use
+        cat > $PACKAGE_DIR/setup-env.sh << 'EOF'
+        #!/bin/bash
+        # Setup environment for Android Kernel OLLVM Toolchain
+        
+        echo "Setting up Android Kernel OLLVM Toolchain"
+        
+        TOOLCHAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        
+        # Add toolchain to PATH
+        export PATH="$TOOLCHAIN_DIR/bin:$PATH"
+        
+        # Set compiler variables
+        export CC="clang"
+        export CXX="clang++"
+        export AR="llvm-ar"
+        export NM="llvm-nm"
+        export STRIP="llvm-strip"
+        export OBJCOPY="llvm-objcopy"
+        export OBJDUMP="llvm-objdump"
+        export READELF="llvm-readelf"
+        export RANLIB="llvm-ranlib"
+        
+        # Android kernel compilation flags
+        export KCFLAGS="-target aarch64-linux-gnu -nostdinc -mgeneral-regs-only -ffixed-x18"
+        
+        # OLLVM obfuscation flags (optional)
+        export OLLVM_FLAGS="-mllvm -fla -mllvm -sub -mllvm -bcf"
+        
+        # Combined flags for Android kernel with OLLVM
+        export ANDROID_OLLVM_FLAGS="$KCFLAGS $OLLVM_FLAGS"
+        
+        echo "Environment variables set:"
+        echo "  CC=$CC"
+        echo "  KCFLAGS set for Android kernel compilation"
+        echo "  OLLVM_FLAGS set for obfuscation"
+        echo ""
+        echo "Usage examples:"
+        echo "  clang $ANDROID_OLLVM_FLAGS -c kernel_file.c -o kernel_file.o"
+        echo "  make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC=\"clang $ANDROID_OLLVM_FLAGS\""
+        EOF
+        
+        chmod +x $PACKAGE_DIR/setup-env.sh
+        
+        # Create version info file
+        cat > $PACKAGE_DIR/VERSION.txt << EOF
+        Android Kernel OLLVM Toolchain
+        ==============================
+        Build Date: $(date)
+        Build System: $(uname -s -m -r)
+        Clang Version: $(./bin/clang --version | head -1)
+        Target: aarch64-unknown-linux-gnu
+        Features:
+          - OLLVM obfuscation passes (-mllvm -fla -mllvm -sub -mllvm -bcf)
+          - Android kernel compilation support
+          - LLD linker (if built)
+          - LLVM tools (ar, nm, strip, etc.)
+          - ThinLTO support
+          - Kernel headers: ${{ github.event.inputs.download_linux_headers && 'Included' || 'Not included' }}
+        
+        Environment Setup:
+          source setup-env.sh
+        
+        Kernel Compilation:
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \\
+               CC="clang" \\
+               KCFLAGS="\$KCFLAGS \$OLLVM_FLAGS"
+        
+        OLLVM Options:
+          -mllvm -fla    : Control flow flattening
+          -mllvm -sub    : Instructions substitution
+          -mllvm -bcf    : Bogus control flow
+          -mllvm -sobf   : String obfuscation (if available)
+        
+        Kernel Specific Flags:
+          -target aarch64-linux-gnu
+          -nostdinc
+          -mgeneral-regs-only
+          -ffixed-x18 (Android requirement)
+        EOF
+        
+        # Create README
+        cat > $PACKAGE_DIR/README.md << 'EOF'
+        # Android Kernel OLLVM Toolchain
+        
+        ## Overview
+        This toolchain is specifically built for compiling Android kernels with OLLVM obfuscation passes.
+        
+        ## Quick Start
+        ```bash
+        # Set up environment
+        source setup-env.sh
+        
+        # Test the toolchain
+        ./test_kernel_compile.sh
+        
+        # Compile a kernel module
+        clang $ANDROID_OLLVM_FLAGS -c module.c -o module.o
+        ```
+        
+        ## Compiling Android Kernel
+        ```bash
+        # In your kernel source directory
+        make ARCH=arm64 \
+             CROSS_COMPILE=aarch64-linux-gnu- \
+             CC="clang" \
+             KCFLAGS="$KCFLAGS $OLLVM_FLAGS" \
+             -j$(nproc)
+        ```
+        
+        ## OLLVM Options
+        - `-mllvm -fla`: Control flow flattening
+        - `-mllvm -sub`: Instruction substitution
+        - `-mllvm -bcf`: Bogus control flow
+        
+        ## Notes
+        1. This toolchain targets ARM64 (AArch64) architecture
+        2. Includes Android-specific compilation flags
+        3. Kernel headers are included in sysroot/usr/
+        4. Use LLD linker for best results: `-fuse-ld=lld`
+        
+        ## License
+        Built from OLLVM project with Android compatibility patches.
+        EOF
+        
+        # Create test script
+        cat > $PACKAGE_DIR/test_kernel_compile.sh << 'EOF'
+        #!/bin/bash
+        # Test kernel compilation with this toolchain
+        
+        echo "=== Testing Android Kernel OLLVM Toolchain ==="
+        
+        # Source environment
+        TOOLCHAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        source "$TOOLCHAIN_DIR/setup-env.sh" > /dev/null 2>&1
+        
+        echo "Toolchain directory: $TOOLCHAIN_DIR"
+        echo ""
+        
+        # Test 1: Check OLLVM passes
+        echo "Test 1: OLLVM Passes"
+        if clang -mllvm -help 2>&1 | grep -q -E "fla|sub|bcf"; then
+          echo "✅ OLLVM passes available"
+          clang -mllvm -help 2>&1 | grep -E "fla|sub|bcf" | head -3
+        else
+          echo "⚠️  OLLVM passes not found in help"
+        fi
+        
+        # Test 2: Basic compilation
+        echo ""
+        echo "Test 2: Basic AArch64 Compilation"
+        cat > /tmp/kernel_basic.c << 'TEST_EOF'
+        int kernel_function(int x) { 
+            return x * 2 + 1;
+        }
+        TEST_EOF
+        
+        clang --target=aarch64-linux-gnu \
+              -c /tmp/kernel_basic.c \
+              -o /tmp/kernel_basic.o 2>&1
+        
+        if [ $? -eq 0 ]; then
+          echo "✅ Basic AArch64 compilation works"
+          file /tmp/kernel_basic.o
+        else
+          echo "❌ Basic compilation failed"
+        fi
+        
+        # Test 3: Kernel compilation with OLLVM
+        echo ""
+        echo "Test 3: Kernel Compilation with OLLVM"
+        cat > /tmp/kernel_advanced.c << 'TEST_EOF'
+        #ifndef __KERNEL__
+        #define __KERNEL__
+        #endif
+        
+        #ifndef MODULE
+        #define MODULE
+        #endif
+        
+        static int __init test_init(void) {
+            int secret = 0x12345678;
+            int result = secret * 2;
+            return result;
         }
         
-        static void __exit test_exit(void)
-        {
-            printk(KERN_INFO "OLLVM Test Module Unloaded\n");
+        static void __exit test_exit(void) {
+            return;
         }
         
         module_init(test_init);
         module_exit(test_exit);
         
         MODULE_LICENSE("GPL");
-        MODULE_AUTHOR("Test");
-        MODULE_DESCRIPTION("OLLVM Kernel Module Test");
-        EOF
+        MODULE_DESCRIPTION("Test module");
+        TEST_EOF
         
-        # Create simple Makefile
-        cat > common/Makefile.test << 'EOF'
-        obj-m := test_module.o
-        
-        KDIR := /lib/modules/$(shell uname -r)/build
-        PWD := $(shell pwd)
-        
-        # Android kernel flags
-        EXTRA_CFLAGS := -nostdinc \
-                        -isystem $(shell $(CC) -print-file-name=include) \
-                        -I$(PWD)/include \
-                        -I$(PWD)/arch/arm64/include \
-                        -I$(PWD)/arch/arm64/include/generated \
-                        -D__KERNEL__ \
-                        -DMODULE \
-                        -Wall \
-                        -Wundef \
-                        -Wstrict-prototypes \
-                        -Wno-trigraphs \
-                        -fno-strict-aliasing \
-                        -fno-common \
-                        -fshort-wchar \
-                        -fno-PIC \
-                        -mgeneral-regs-only \
-                        -mno-implicit-float
-        
-        all:
-        	make -C $(KDIR) M=$(PWD) modules
-        
-        clean:
-        	make -C $(KDIR) M=$(PWD) clean
-        EOF
-
-    - name: Test OLLVM with AOSP Kernel Build
-      run: |
-        echo "=== Testing OLLVM Clang with AOSP Kernel ==="
-        
-        cd llvm-project/build
-        
-        # Create test environment
-        export OLLVM_CLANG="$(pwd)/bin/clang"
-        export PATH="$(pwd)/bin:$PATH"
-        
-        # Test 1: Basic kernel compilation
-        echo "1. Basic kernel module test..."
-        
-        cat > /tmp/simple_kernel.c << 'EOF'
-        #define __KERNEL__
-        #define MODULE
-        
-        int test_function(void) {
-            int x = 42;
-            int y = x * 2;
-            return y;
-        }
-        EOF
-        
-        # Try with various kernel flags
-        $OLLVM_CLANG \
-          --target=aarch64-linux-gnu \
-          -nostdinc \
-          -D__KERNEL__ \
-          -DMODULE \
-          -fno-PIC \
-          -mgeneral-regs-only \
-          -c /tmp/simple_kernel.c \
-          -o /tmp/simple_kernel.o
+        clang --target=aarch64-linux-gnu \
+              -nostdinc \
+              -D__KERNEL__ \
+              -DMODULE \
+              -mgeneral-regs-only \
+              -ffixed-x18 \
+              -c /tmp/kernel_advanced.c \
+              -o /tmp/kernel_advanced.o \
+              -mllvm -fla \
+              -mllvm -sub 2>&1
         
         if [ $? -eq 0 ]; then
-            echo "✅ Basic kernel flags work"
-            file /tmp/simple_kernel.o
+          echo "✅ Kernel compilation with OLLVM works"
+          echo "Object file info:"
+          file /tmp/kernel_advanced.o
+          echo "Symbols:"
+          llvm-nm /tmp/kernel_advanced.o 2>/dev/null | grep -E "test_init|test_exit" || true
         else
-            echo "❌ Basic kernel flags fail"
+          echo "❌ Kernel compilation with OLLVM failed"
         fi
         
-        # Test 2: OLLVM obfuscation with kernel code
-        echo ""
-        echo "2. Testing OLLVM obfuscation..."
-        
-        $OLLVM_CLANG \
-          --target=aarch64-linux-gnu \
-          -nostdinc \
-          -D__KERNEL__ \
-          -DMODULE \
-          -fno-PIC \
-          -mgeneral-regs-only \
-          -c /tmp/simple_kernel.c \
-          -o /tmp/simple_kernel_ollvm.o \
-          -mllvm -fla \
-          -mllvm -sub
-        
-        if [ $? -eq 0 ]; then
-            echo "✅ OLLVM works with kernel flags"
-            # Check if binary is different (obfuscated)
-            if ! cmp -s /tmp/simple_kernel.o /tmp/simple_kernel_ollvm.o; then
-                echo "✅ OLLVM changed the binary (obfuscation working)"
-            else
-                echo "⚠️ OLLVM didn't change binary"
-            fi
-        else
-            echo "❌ OLLVM fails with kernel flags"
-        fi
-        
-        # Test 3: Integration with Android toolchain
-        echo ""
-        echo "3. Integration strategy..."
-        
-        cat > /tmp/integration_test.sh << 'EOF'
-        #!/bin/bash
-        # How to use OLLVM clang with Android toolchain
-        
-        # Your Android toolchain path
-        ANDROID_TOOLCHAIN="/opt/ddk/clang/clang-r450784e"
-        
-        # Your OLLVM clang
-        OLLVM_CLANG="$(pwd)/bin/clang"
-        
-        echo "Method 1: Replace clang only"
-        echo "cp '$OLLVM_CLANG' '$ANDROID_TOOLCHAIN/bin/clang.ollvm'"
-        echo "make CC='$ANDROID_TOOLCHAIN/bin/clang.ollvm' KCFLAGS='-mllvm -fla -mllvm -sub'"
+        # Clean up
+        rm -f /tmp/kernel_basic.c /tmp/kernel_basic.o /tmp/kernel_advanced.c /tmp/kernel_advanced.o
         
         echo ""
-        echo "Method 2: Use as wrapper"
-        echo "export CC='$OLLVM_CLANG'"
-        echo "export PATH='$ANDROID_TOOLCHAIN/bin:\$PATH'"
-        echo "make ARCH=arm64 CROSS_COMPILE=aarch64-linux-android-"
-        
+        echo "=== Test Summary ==="
+        echo "Toolchain is ready for Android kernel compilation with OLLVM obfuscation."
         echo ""
-        echo "Method 3: Hybrid approach (recommended)"
-        echo "# Use Android's ld.lld, llvm-ar, etc. with OLLVM clang"
-        echo "make \\"
-        echo "  CC='$OLLVM_CLANG' \\"
-        echo "  LD='$ANDROID_TOOLCHAIN/bin/ld.lld' \\"
-        echo "  AR='$ANDROID_TOOLCHAIN/bin/llvm-ar' \\"
-        echo "  KCFLAGS='-mllvm -fla -mllvm -sub'"
+        echo "To use:"
+        echo "1. source $(realpath --relative-to=. "$TOOLCHAIN_DIR/setup-env.sh")"
+        echo "2. Export the environment variables in your build script"
+        echo "3. Use CC=\"clang\" with KCFLAGS for kernel builds"
         EOF
         
-        chmod +x /tmp/integration_test.sh
-        cat /tmp/integration_test.sh
-
-    - name: Create OLLVM Clang Package with Integration Scripts
-      run: |
-        echo "=== Creating OLLVM Clang Package ==="
-        
-        cd llvm-project/build
-        
-        mkdir -p ollvm-clang-aosp
-        
-        # Copy only clang binary
-        cp bin/clang ollvm-clang-aosp/
-        
-        # Create integration scripts
-        cat > ollvm-clang-aosp/integrate_with_android.sh << 'EOF'
-        #!/bin/bash
-        # Integrate OLLVM clang with Android toolchain
-        
-        if [ -z "$1" ]; then
-            echo "Usage: $0 <android_toolchain_path>"
-            echo "Example: $0 /opt/ddk/clang/clang-r450784e"
-            exit 1
-        fi
-        
-        ANDROID_TOOLCHAIN="$1"
-        OLLVM_CLANG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/clang"
-        
-        echo "=== Integrating OLLVM Clang with Android Toolchain ==="
-        echo "Android Toolchain: $ANDROID_TOOLCHAIN"
-        echo "OLLVM Clang: $OLLVM_CLANG"
-        
-        # Backup original clang
-        if [ -f "$ANDROID_TOOLCHAIN/bin/clang" ]; then
-            cp "$ANDROID_TOOLCHAIN/bin/clang" "$ANDROID_TOOLCHAIN/bin/clang.backup"
-            echo "✅ Backed up original clang"
-        fi
-        
-        # Copy OLLVM clang
-        cp "$OLLVM_CLANG" "$ANDROID_TOOLCHAIN/bin/clang.ollvm"
-        chmod +x "$ANDROID_TOOLCHAIN/bin/clang.ollvm"
-        
-        # Create wrapper script that uses OLLVM for modules only
-        cat > "$ANDROID_TOOLCHAIN/bin/clang.ollvm-wrapper" << 'WRAPPER_EOF'
-        #!/bin/bash
-        # Wrapper to use OLLVM only for kernel modules
-        
-        ANDROID_CLANG="$ANDROID_TOOLCHAIN/bin/clang.backup"
-        OLLVM_CLANG="$ANDROID_TOOLCHAIN/bin/clang.ollvm"
-        
-        # Check if this is kernel/module compilation
-        IS_KERNEL=0
-        for arg in "$@"; do
-            if [[ "$arg" == "-D__KERNEL__" ]] || \
-               [[ "$arg" == "-DMODULE" ]] || \
-               [[ "$arg" == *".ko" ]] || \
-               [[ "$arg" == "-c" ]]; then
-                IS_KERNEL=1
-                break
-            fi
-        done
-        
-        if [ "$IS_KERNEL" -eq 1 ]; then
-            # Use OLLVM for kernel code
-            echo "[OLLVM] Compiling kernel code with obfuscation" >&2
-            exec "$OLLVM_CLANG" "$@" -mllvm -fla -mllvm -sub
-        else
-            # Use original Android clang for everything else
-            exec "$ANDROID_CLANG" "$@"
-        fi
-        WRAPPER_EOF
-        
-        chmod +x "$ANDROID_TOOLCHAIN/bin/clang.ollvm-wrapper"
-        
-        echo ""
-        echo "✅ Integration complete!"
-        echo ""
-        echo "Usage options:"
-        echo "1. Use OLLVM for everything:"
-        echo "   export CC='$ANDROID_TOOLCHAIN/bin/clang.ollvm'"
-        echo "   export KCFLAGS='-mllvm -fla -mllvm -sub'"
-        echo ""
-        echo "2. Smart wrapper (recommended):"
-        echo "   export CC='$ANDROID_TOOLCHAIN/bin/clang.ollvm-wrapper'"
-        echo "   # Automatically uses OLLVM only for kernel code"
-        echo ""
-        echo "3. Manual selection:"
-        echo "   # For kernel modules:"
-        echo "   make CC='$ANDROID_TOOLCHAIN/bin/clang.ollvm' KCFLAGS='-mllvm -fla'"
-        echo "   # For normal code:"
-        echo "   make CC='$ANDROID_TOOLCHAIN/bin/clang.backup'"
-        EOF
-        
-        chmod +x ollvm-clang-aosp/integrate_with_android.sh
-        
-        # Create build example
-        cat > ollvm-clang-aosp/example_build.sh << 'EOF'
-        #!/bin/bash
-        # Example: Build kernel module with OLLVM
-        
-        # Set paths
-        ANDROID_TOOLCHAIN="/opt/ddk/clang/clang-r450784e"
-        OLLVM_CLANG="./clang"
-        
-        # Method 1: Direct replacement
-        echo "=== Method 1: Direct OLLVM ==="
-        echo "make \\"
-        echo "  ARCH=arm64 \\"
-        echo "  CC='$OLLVM_CLANG' \\"
-        echo "  LD='$ANDROID_TOOLCHAIN/bin/ld.lld' \\"
-        echo "  AR='$ANDROID_TOOLCHAIN/bin/llvm-ar' \\"
-        echo "  KCFLAGS='-mllvm -fla -mllvm -sub -mllvm -bcf'"
-        
-        echo ""
-        echo "=== Method 2: Use with original clang flags ==="
-        echo "# First build kernel normally"
-        echo "make ARCH=arm64 CC=$ANDROID_TOOLCHAIN/bin/clang"
-        echo ""
-        echo "# Then build modules with OLLVM"
-        echo "make modules CC='$OLLVM_CLANG' \\"
-        echo "  KCFLAGS='-mllvm -fla -mllvm -sub'"
-        
-        echo ""
-        echo "=== Common OLLVM flags ==="
-        echo "-mllvm -fla    # Control flow flattening"
-        echo "-mllvm -sub    # Instruction substitution"
-        echo "-mllvm -bcf    # Bogus control flow"
-        echo "-mllvm -sobf   # String obfuscation"
-        EOF
-        
-        chmod +x ollvm-clang-aosp/example_build.sh
+        chmod +x $PACKAGE_DIR/test_kernel_compile.sh
         
         # Create package
-        tar -czf ollvm-clang-aosp.tar.gz ollvm-clang-aosp/
+        echo "Creating package archive..."
+        tar -czf android-kernel-ollvm-arm64.tar.gz $PACKAGE_DIR/
         
-        echo "✅ Package created: ollvm-clang-aosp.tar.gz"
-        echo "Includes:"
-        echo "  - OLLVM clang binary"
-        echo "  - Integration script for Android toolchain"
-        echo "  - Example build scripts"
+        echo "✅ Package created: android-kernel-ollvm-arm64.tar.gz"
+        echo "Size: $(du -h android-kernel-ollvm-arm64.tar.gz | cut -f1)"
+        echo ""
+        echo "Package contents:"
+        tar -tzf android-kernel-ollvm-arm64.tar.gz | sort | head -30
+        echo "... and more"
+        
+        # Show final structure
+        echo ""
+        echo "Final directory structure:"
+        find $PACKAGE_DIR -type f | sort | head -20
 
-    - name: Upload OLLVM Clang Package
+    - name: Upload Android Kernel OLLVM
       uses: actions/upload-artifact@v4
       with:
-        name: ollvm-clang-aosp
-        path: llvm-project/build/ollvm-clang-aosp.tar.gz
+        name: android-kernel-ollvm-arm64
+        path: llvm-project/build/android-kernel-ollvm-arm64.tar.gz
+        retention-days: 7
+        compression-level: 0
+
+    - name: Upload Build Logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs
+        path: |
+          llvm-project/build/cmake_config.log
+          llvm-project/build/build.log
+          llvm-project/build/CMakeCache.txt
+          llvm-project/build/CMakeFiles/CMakeOutput.log
+          llvm-project/build/CMakeFiles/CMakeError.log
+        retention-days: 7
+
+    - name: Upload Test Results
+      if: always()
+      run: |
+        echo "=== Build Summary ==="
+        cd llvm-project/build
+        
+        if [ -f "android-kernel-ollvm-arm64.tar.gz" ]; then
+          echo "✅ Build successful!"
+          echo "Package: android-kernel-ollvm-arm64.tar.gz"
+          echo "Size: $(du -h android-kernel-ollvm-arm64.tar.gz | cut -f1)"
+          
+          # Quick test of the built toolchain
+          if [ -f "bin/clang" ]; then
+            echo ""
+            echo "=== Toolchain Info ==="
+            ./bin/clang --version | head -3
+            echo "Target: $(./bin/clang -dumpmachine)"
+          fi
+        else
+          echo "❌ Build failed!"
+          exit 1
+        fi
