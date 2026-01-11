@@ -1,4 +1,4 @@
-name: Build Android Kernel OLLVM Compiler ARM64 GNU final
+name: Build Android Kernel OLLVM Compiler ARM64 GNU
 
 on:
   workflow_dispatch:
@@ -276,16 +276,16 @@ jobs:
           
           # Test AOSP kernel compatibility
           echo "Testing AOSP kernel compilation:"
-          cat > /tmp/test_aosp.c << 'EOF'
-          #define __KERNEL__
-          #define MODULE
-          #include <linux/types.h>
-          #include <linux/version.h>
-          
-          static int test_function(void) {
-              return LINUX_VERSION_CODE;
-          }
-          EOF
+          cat > /tmp/test_aosp.c << 'TEST_AOSP_EOF'
+#define __KERNEL__
+#define MODULE
+#include <linux/types.h>
+#include <linux/version.h>
+
+static int test_function(void) {
+    return LINUX_VERSION_CODE;
+}
+TEST_AOSP_EOF
           
           # Test with AOSP-like flags
           ./bin/clang --target=aarch64-linux-gnu \
@@ -368,10 +368,9 @@ jobs:
         fi
         
         # Create AOSP integration scripts
-        echo "Creating AOSP integration files..."
         
         # 1. Environment setup script
-        cat > "$PACKAGE_DIR/setup-aosp-env.sh" << 'EOF'
+        cat > "$PACKAGE_DIR/setup-aosp-env.sh" << 'SETUP_EOF'
 #!/bin/bash
 # Setup script for AOSP kernel builds with OLLVM
 
@@ -403,20 +402,20 @@ echo "        LD=\"ld.lld\" \\"
 echo "        KCFLAGS=\"-flto=thin \${AOSP_OLLVM_FLAGS}\""
 echo ""
 echo "3. Test compilation:"
-echo "   $TOOLCHAIN_DIR/bin/test-aosp-compile.sh"
+echo "   \$TOOLCHAIN_DIR/bin/test-aosp-compile.sh"
 echo ""
 
 # Verify setup
 if command -v clang >/dev/null 2>&1; then
     echo "✅ Toolchain is ready for AOSP kernel builds"
-    echo "   Clang: $(clang --version | head -1)"
+    echo "   Clang: \$(clang --version | head -1)"
 else
     echo "❌ Toolchain not found in PATH"
 fi
-EOF
+SETUP_EOF
         
         # 2. Test compilation script
-        cat > "$PACKAGE_DIR/bin/test-aosp-compile.sh" << 'EOF'
+        cat > "$PACKAGE_DIR/bin/test-aosp-compile.sh" << 'TEST_EOF'
 #!/bin/bash
 # Test AOSP kernel compilation with OLLVM
 
@@ -430,7 +429,7 @@ clang -mllvm -help 2>&1 | grep -A2 -B2 "fla\|sub\|bcf" || echo "⚠️  OLLVM pa
 # Test 2: AOSP kernel flags
 echo ""
 echo "2. Testing AOSP kernel compilation flags:"
-cat > /tmp/test_kernel.c << 'TEST_EOF'
+cat > /tmp/test_kernel.c << 'KERNEL_TEST_EOF'
 #define __KERNEL__
 #define MODULE
 #include <linux/types.h>
@@ -442,7 +441,7 @@ static int __init test_init(void) { return 0; }
 static void __exit test_exit(void) { }
 module_init(test_init);
 module_exit(test_exit);
-TEST_EOF
+KERNEL_TEST_EOF
 
 echo "Compiling with AOSP kernel flags..."
 clang --target=aarch64-linux-gnu \
@@ -457,7 +456,7 @@ clang --target=aarch64-linux-gnu \
 
 if [ $? -eq 0 ]; then
     echo "✅ AOSP kernel flags work"
-    echo "   File type: $(file /tmp/test_kernel.o)"
+    echo "   File type: \$(file /tmp/test_kernel.o)"
 else
     echo "❌ AOSP kernel flags test failed"
 fi
@@ -478,14 +477,14 @@ if [ $? -eq 0 ]; then
     echo "✅ OLLVM works with kernel code"
     
     # Compare file sizes
-    SIZE_NORMAL=$(stat -c%s /tmp/test_kernel.o 2>/dev/null || stat -f%z /tmp/test_kernel.o)
-    SIZE_OLLVM=$(stat -c%s /tmp/test_kernel_ollvm.o 2>/dev/null || stat -f%z /tmp/test_kernel_ollvm.o)
+    SIZE_NORMAL=\$(stat -c%s /tmp/test_kernel.o 2>/dev/null || stat -f%z /tmp/test_kernel.o)
+    SIZE_OLLVM=\$(stat -c%s /tmp/test_kernel_ollvm.o 2>/dev/null || stat -f%z /tmp/test_kernel_ollvm.o)
     
-    if [ -n "$SIZE_NORMAL" ] && [ -n "$SIZE_OLLVM" ]; then
-        echo "   Normal: ${SIZE_NORMAL} bytes"
-        echo "   OLLVM:  ${SIZE_OLLVM} bytes"
+    if [ -n "\$SIZE_NORMAL" ] && [ -n "\$SIZE_OLLVM" ]; then
+        echo "   Normal: \${SIZE_NORMAL} bytes"
+        echo "   OLLVM:  \${SIZE_OLLVM} bytes"
         
-        if [ "$SIZE_OLLVM" -gt "$SIZE_NORMAL" ]; then
+        if [ "\$SIZE_OLLVM" -gt "\$SIZE_NORMAL" ]; then
             echo "   ✓ OLLVM increased size (obfuscation working)"
         fi
     fi
@@ -498,18 +497,18 @@ rm -f /tmp/test_kernel.c /tmp/test_kernel.o /tmp/test_kernel_ollvm.o
 
 echo ""
 echo "=== Test Complete ==="
-EOF
+TEST_EOF
         
         chmod +x "$PACKAGE_DIR/bin/test-aosp-compile.sh"
         chmod +x "$PACKAGE_DIR/setup-aosp-env.sh"
         
         # 3. AOSP build examples
-        cat > "$PACKAGE_DIR/examples/aosp-kernel-build.sh" << 'EOF'
+        cat > "$PACKAGE_DIR/examples/aosp-kernel-build.sh" << 'EXAMPLE_EOF'
 #!/bin/bash
 # Example: Building AOSP kernel module with OLLVM
 
 # Setup environment
-source $(dirname "$0")/../setup-aosp-env.sh
+source \$(dirname "\$0")/../setup-aosp-env.sh
 
 # Example module
 cat > example_module.c << 'MODULE_EOF'
@@ -542,28 +541,28 @@ example-y := example_module.o
 KDIR ?= /path/to/your/kernel
 
 # AOSP OLLVM flags
-EXTRA_CFLAGS += $(AOSP_OLLVM_FLAGS)
+EXTRA_CFLAGS += \$(AOSP_OLLVM_FLAGS)
 KCFLAGS += -flto=thin
 
 all:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules \
-		CC="clang" \
-		LD="ld.lld" \
-		AR="llvm-ar" \
+	\$(MAKE) -C \$(KDIR) M=\$(PWD) modules \\
+		CC="clang" \\
+		LD="ld.lld" \\
+		AR="llvm-ar" \\
 		OBJCOPY="llvm-objcopy"
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
+	\$(MAKE) -C \$(KDIR) M=\$(PWD) clean
 MAKEFILE_EOF
 
 echo "Example AOSP module created"
 echo "Edit KDIR in Makefile and run 'make'"
-EOF
+EXAMPLE_EOF
         
         chmod +x "$PACKAGE_DIR/examples/aosp-kernel-build.sh"
         
         # Create README
-        cat > "$PACKAGE_DIR/README.md" << 'EOF'
+        cat > "$PACKAGE_DIR/README.md" << 'README_EOF'
 # AOSP Kernel OLLVM Toolchain
 
 ## Overview
@@ -580,5 +579,5 @@ source setup-aosp-env.sh
 ./bin/test-aosp-compile.sh
 
 # 3. Use in AOSP kernel builds
-export PATH="$PWD/bin:$PATH"
+export PATH="\$PWD/bin:\$PATH"
 make CC=clang KCFLAGS="-mllvm -fla -mllvm -sub"
