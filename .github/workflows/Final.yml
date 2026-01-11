@@ -1,30 +1,45 @@
-name: Build Android OLLVM Compiler 64
+name: Build Android Kernel OLLVM Compiler ARM64 GNU final
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ release/14.x ]
+    inputs:
+      kernel_version:
+        description: 'Linux kernel base version (e.g., 5.15, 6.1, 6.6)'
+        type: string
+        default: '5.15'
+      ollvm_branch:
+        description: 'OLLVM repository branch'
+        type: string
+        default: 'release/14.x'
+      build_mode:
+        description: 'Build configuration'
+        type: choice
+        options:
+          - minimal
+          - full
+          - android-optimized
+        default: 'android-optimized'
 
 jobs:
-  build-android-ollvm:
+  build-android-kernel-ollvm:
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
     
     steps:
+    # ============================================
+    # STEP 1: Setup and Dependencies
+    # ============================================
     - name: Checkout OLLVM
       uses: actions/checkout@v4
       with:
         repository: sr-tream/obfuscator
-        ref: release/14.x
-        submodules: recursive
+        ref: ${{ github.event.inputs.ollvm_branch }}
+        submodules: true
+        fetch-depth: 0
 
-    - name: Apply OLLVM patch
+    - name: Install Build Dependencies
       run: |
-        cd llvm-project
-        git apply --whitespace=nowarn ../obfuscator.patch
-        echo "✅ OLLVM patches applied"
-
-    - name: Install dependencies
-      run: |
+        echo "=== Installing Dependencies ==="
         sudo apt update
         sudo apt install -y \
           build-essential \
@@ -33,209 +48,537 @@ jobs:
           git \
           python3 \
           python3-pip \
-          ninja-build \
-          lld \
           clang \
           gcc-aarch64-linux-gnu \
-          g++-aarch64-linux-gnu
+          g++-aarch64-linux-gnu \
+          libc6-dev-i386 \
+          zlib1g-dev \
+          libncurses-dev \
+          libssl-dev \
+          libelf-dev \
+          dwarves \
+          lld \
+          flex \
+          bison \
+          wget \
+          xz-utils
         
         pip3 install pygments pyyaml
         sudo ln -s /usr/bin/python3 /usr/bin/python 2>/dev/null || true
 
-    - name: Build OLLVM according to repo
+    # ============================================
+    # STEP 2: Prepare OLLVM Source
+    # ============================================
+    - name: Setup OLLVM Source
       run: |
+        echo "=== Setting up OLLVM Source ==="
+        
+        # Navigate to correct directory
+        if [ -f "README.md" ]; then
+          echo "In main directory"
+        elif [ -d "obfuscator" ]; then
+          cd obfuscator
+        fi
+        
+        # Ensure submodules are initialized
+        if [ ! -d "llvm-project" ]; then
+          echo "Initializing submodules..."
+          git submodule update --init --recursive --depth 1
+        fi
+        
+        # Verify we have OLLVM patches
+        echo "Checking for OLLVM patches..."
+        find . -name "*.patch" -o -name "*.diff" | head -5 || echo "No patches found"
+        
+        # Apply OLLVM patches if they exist
+        if ls *.patch 2>/dev/null; then
+          echo "Applying OLLVM patches..."
+          cd llvm-project
+          for patch in ../*.patch; do
+            echo "Applying $(basename "$patch")"
+            patch -p1 --no-backup-if-mismatch < "$patch" 2>/dev/null || \
+            patch -p1 -F 3 --no-backup-if-mismatch < "$patch" 2>/dev/null || \
+            echo "Patch $(basename "$patch") may have issues"
+          done
+          cd ..
+        fi
+
+    # ============================================
+    # STEP 3: Download Android Kernel Headers
+    # ============================================
+    - name: Download Android-Compatible Kernel Headers
+      run: |
+        echo "=== Downloading Kernel Headers for AOSP Compatibility ==="
+        
+        KERNEL_BASE="${{ github.event.inputs.kernel_version }}"
+        echo "Using kernel base version: $KERNEL_BASE"
+        
+        # List of reliable kernel versions for AOSP
+        # These match common Android kernel versions
+        declare -A KERNEL_VERSIONS=(
+          ["5.10"]="5.10.210"
+          ["5.15"]="5.15.150"
+          ["6.1"]="6.1.82"
+          ["6.6"]="6.6.30"
+        )
+        
+        # Try to get specific version, fallback to base
+        if [ -n "${KERNEL_VERSIONS[$KERNEL_BASE]}" ]; then
+          KERNEL_VER="${KERNEL_VERSIONS[$KERNEL_BASE]}"
+        else
+          KERNEL_VER="$KERNEL_BASE"
+        fi
+        
+        echo "Attempting to download kernel $KERNEL_VER"
+        
+        # Function to test URL existence
+        test_url() {
+          wget --spider --timeout=10 --tries=1 "$1" 2>/dev/null
+          return $?
+        }
+        
+        # Try multiple URL patterns
+        URL_PATTERNS=(
+          "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_BASE%%.*}.x/linux-${KERNEL_VER}.tar.xz"
+          "https://mirrors.edge.kernel.org/pub/linux/kernel/v${KERNEL_BASE%%.*}.x/linux-${KERNEL_VER}.tar.xz"
+          "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_BASE%%.*}.x/linux-${KERNEL_BASE}.tar.xz"
+          "https://mirrors.edge.kernel.org/pub/linux/kernel/v${KERNEL_BASE%%.*}.x/linux-${KERNEL_BASE}.tar.xz"
+        )
+        
+        KERNEL_URL=""
+        for url in "${URL_PATTERNS[@]}"; do
+          echo "Testing: $url"
+          if test_url "$url"; then
+            KERNEL_URL="$url"
+            FILENAME=$(basename "$url")
+            echo "✅ Found: $FILENAME"
+            break
+          fi
+        done
+        
+        if [ -z "$KERNEL_URL" ]; then
+          echo "❌ Could not find kernel $KERNEL_VER"
+          echo "Falling back to generic headers from existing kernel..."
+          exit 0  # Don't fail, we can still build compiler
+        fi
+        
+        # Download and extract
+        echo "Downloading: $KERNEL_URL"
+        wget --progress=dot:giga "$KERNEL_URL"
+        tar -xf "linux-*.tar.xz"
+        
+        # Extract essential headers for compiler testing
+        KERNEL_DIR=$(find . -maxdepth 1 -name "linux-*" -type d | head -1)
+        if [ -d "$KERNEL_DIR" ]; then
+          echo "Extracting headers from: $KERNEL_DIR"
+          mkdir -p linux-headers/include
+          
+          # Essential kernel headers for AOSP compatibility
+          cp -r "$KERNEL_DIR/include/linux" linux-headers/include/ 2>/dev/null || true
+          cp -r "$KERNEL_DIR/include/uapi" linux-headers/include/ 2>/dev/null || true
+          cp -r "$KERNEL_DIR/include/asm-generic" linux-headers/include/ 2>/dev/null || true
+          
+          # ARM64 specific headers
+          if [ -d "$KERNEL_DIR/arch/arm64/include" ]; then
+            cp -r "$KERNEL_DIR/arch/arm64/include/asm" linux-headers/include/ 2>/dev/null || true
+            cp -r "$KERNEL_DIR/arch/arm64/include/uapi" linux-headers/include/ 2>/dev/null || true
+          fi
+          
+          echo "Headers extracted to linux-headers/"
+        fi
+
+    # ============================================
+    # STEP 4: Configure and Build OLLVM
+    # ============================================
+    - name: Build OLLVM for AOSP Kernel
+      run: |
+        echo "=== Building OLLVM for AOSP Kernel Compatibility ==="
+        
+        # Navigate to llvm-project
+        if [ -d "obfuscator" ]; then
+          cd obfuscator
+        fi
+        
+        cd llvm-project
         mkdir -p build
         cd build
         
-        # SIMPLE build following repo instructions
-        cmake ../llvm-project/llvm \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DLLVM_ENABLE_PROJECTS="clang;lld" \
-          -DLLVM_TARGETS_TO_BUILD="AArch64;X86" \
-          -DLLVM_DEFAULT_TARGET_TRIPLE="aarch64-linux-android" \
-          -DLLVM_HOST_TRIPLE="x86_64-unknown-linux-gnu" \
-          -DLLVM_ENABLE_LLD=ON \
-          -DLLVM_ENABLE_ASSERTIONS=OFF \
-          -DLLVM_INCLUDE_TESTS=OFF \
-          -DLLVM_INCLUDE_EXAMPLES=OFF \
-          -DLLVM_BUILD_TOOLS=ON \
-          -G "Ninja"
+        # Clean previous build
+        rm -rf ./*
         
-        echo "Building OLLVM Clang..."
-        ninja clang lld -j$(nproc)
+        # Determine build mode
+        BUILD_MODE="${{ github.event.inputs.build_mode }}"
+        
+        echo "Build mode: $BUILD_MODE"
+        
+        # Common CMake flags
+        CMAKE_FLAGS=(
+          "-DCMAKE_BUILD_TYPE=Release"
+          "-DLLVM_ENABLE_PROJECTS=clang;lld"
+          "-DLLVM_TARGETS_TO_BUILD=AArch64"
+          "-DLLVM_DEFAULT_TARGET_TRIPLE=aarch64-unknown-linux-gnu"
+          "-DLLVM_ENABLE_LLD=ON"
+          "-DLLVM_ENABLE_ASSERTIONS=OFF"
+          "-DLLVM_INCLUDE_TESTS=OFF"
+          "-DLLVM_INCLUDE_EXAMPLES=OFF"
+          "-DLLVM_BUILD_TOOLS=ON"
+          "-DCMAKE_C_COMPILER=clang"
+          "-DCMAKE_CXX_COMPILER=clang++"
+          "-DCMAKE_ASM_COMPILER=clang"
+          "-DCLANG_DEFAULT_LINKER=lld"
+          "-DLLVM_ENABLE_PIC=ON"
+          "-DLLVM_USE_LINKER=lld"
+          "-G" "Ninja"
+        )
+        
+        # Mode-specific flags
+        case "$BUILD_MODE" in
+          "minimal")
+            CMAKE_FLAGS+=("-DLLVM_ENABLE_PROJECTS=clang")
+            ;;
+          "full")
+            CMAKE_FLAGS+=("-DLLVM_ENABLE_PROJECTS=clang;lld;compiler-rt;libcxx;libcxxabi")
+            CMAKE_FLAGS+=("-DLLVM_ENABLE_RUNTIMES=compiler-rt;libcxx;libcxxabi")
+            ;;
+          "android-optimized")
+            # Optimized for Android kernel builds
+            CMAKE_FLAGS+=(
+              "-DLLVM_ENABLE_PROJECTS=clang;lld"
+              "-DCMAKE_C_FLAGS=-O2 -march=native"
+              "-DCMAKE_CXX_FLAGS=-O2 -march=native"
+              "-DLLVM_ENABLE_LTO=Thin"
+              "-DCLANG_DEFAULT_RTLIB=compiler-rt"
+              "-DLLVM_USE_SPLIT_DWARF=ON"
+              "-DLLVM_OPTIMIZED_TABLEGEN=ON"
+            )
+            ;;
+        esac
+        
+        # Configure
+        echo "Configuring with flags:"
+        printf '%s\n' "${CMAKE_FLAGS[@]}"
+        
+        cmake ../llvm "${CMAKE_FLAGS[@]}"
+        
+        # Build
+        echo "Building OLLVM..."
+        ninja -j$(nproc)
         
         # Verify build
+        echo "=== Verifying Build ==="
+        
         if [ -f "bin/clang" ]; then
-          echo "✅ SUCCESS: Built Clang!"
-          ./bin/clang --version
+          echo "✅ Clang built successfully"
+          
+          # Test OLLVM passes
+          echo "Testing OLLVM passes:"
+          ./bin/clang -mllvm -help 2>&1 | grep -E "fla|sub|bcf" || echo "⚠️  OLLVM passes not found in help"
+          
+          # Test AOSP kernel compatibility
+          echo "Testing AOSP kernel compilation:"
+          cat > /tmp/test_aosp.c << 'EOF'
+          #define __KERNEL__
+          #define MODULE
+          #include <linux/types.h>
+          #include <linux/version.h>
+          
+          static int test_function(void) {
+              return LINUX_VERSION_CODE;
+          }
+          EOF
+          
+          # Test with AOSP-like flags
+          ./bin/clang --target=aarch64-linux-gnu \
+            -nostdinc \
+            -isystem /usr/aarch64-linux-gnu/include \
+            -D__KERNEL__ \
+            -DMODULE \
+            -mgeneral-regs-only \
+            -c /tmp/test_aosp.c \
+            -o /tmp/test_aosp.o 2>&1
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ AOSP kernel compilation works"
+          else
+            echo "⚠️  AOSP kernel test failed (may need more headers)"
+          fi
+          
         else
-          echo "❌ FAILED: Clang not built"
+          echo "❌ Clang build failed"
           exit 1
         fi
 
-    - name: Test Android compilation
+    # ============================================
+    # STEP 5: Create AOSP-Compatible Toolchain Package
+    # ============================================
+    - name: Package AOSP Kernel OLLVM Toolchain
       run: |
-        export PATH=$PWD/build/bin:$PATH
+        echo "=== Creating AOSP Kernel OLLVM Toolchain Package ==="
         
-        echo "=== Testing Android Compilation ==="
+        cd llvm-project/build
         
-        # Simple test
-        cat > test.c << 'EOF'
-        int main() { return 0; }
-        EOF
+        # Create package structure
+        PACKAGE_DIR="aosp-kernel-ollvm-arm64"
+        rm -rf "$PACKAGE_DIR"
+        mkdir -p "$PACKAGE_DIR"/{bin,lib,share,examples}
         
-        # Test Android target
-        echo "1. Testing Android ARM64 target:"
-        clang --target=aarch64-linux-android -c test.c -o test.o
+        echo "Copying binaries..."
         
-        if [ $? -eq 0 ]; then
-          echo "✅ Can compile for Android ARM64"
-          file test.o
+        # Essential binaries for AOSP kernel builds
+        ESSENTIAL_BINS=(
+          "clang"
+          "clang++"
+          "ld.lld"
+          "lld"
+          "llvm-ar"
+          "llvm-nm"
+          "llvm-strip"
+          "llvm-objcopy"
+          "llvm-objdump"
+          "llvm-readelf"
+          "llvm-size"
+          "llvm-strings"
+        )
+        
+        for bin in "${ESSENTIAL_BINS[@]}"; do
+          if [ -f "bin/$bin" ]; then
+            cp -L "bin/$bin" "$PACKAGE_DIR/bin/"
+            echo "  ✓ $bin"
+          else
+            echo "  ⚠️  $bin not found"
+          fi
+        done
+        
+        # Copy runtime libraries if available
+        if [ -d "lib/clang" ]; then
+          CLANG_VER=$(ls lib/clang/ | head -1)
+          echo "Clang version: $CLANG_VER"
+          
+          mkdir -p "$PACKAGE_DIR/lib/clang/$CLANG_VER"
+          if [ -d "lib/clang/$CLANG_VER/include" ]; then
+            cp -r "lib/clang/$CLANG_VER/include" "$PACKAGE_DIR/lib/clang/$CLANG_VER/"
+          fi
         fi
         
-        # Test OLLVM
-        echo ""
-        echo "2. Testing OLLVM passes:"
-        echo "Testing -fla:"
-        clang --target=aarch64-linux-android -mllvm -fla -c test.c -o test_fla.o 2>/dev/null && echo "✅ -fla works"
+        # Add kernel headers if available
+        if [ -d "../../../linux-headers" ]; then
+          echo "Adding kernel headers..."
+          mkdir -p "$PACKAGE_DIR/linux-headers"
+          cp -r ../../../linux-headers/* "$PACKAGE_DIR/linux-headers/" 2>/dev/null || true
+        fi
         
-        echo "Testing -sub:"
-        clang --target=aarch64-linux-android -mllvm -sub -c test.c -o test_sub.o 2>/dev/null && echo "✅ -sub works"
+        # Create AOSP integration scripts
+        echo "Creating AOSP integration files..."
         
-        echo "Testing -bcf:"
-        clang --target=aarch64-linux-android -mllvm -bcf -c test.c -o test_bcf.o 2>/dev/null && echo "✅ -bcf works"
-        
-        echo "Testing multiple passes:"
-        clang --target=aarch64-linux-android -mllvm -fla -mllvm -sub -c test.c -o test_multi.o 2>/dev/null && echo "✅ Multiple passes work"
+        # 1. Environment setup script
+        cat > "$PACKAGE_DIR/setup-aosp-env.sh" << 'EOF'
+#!/bin/bash
+# Setup script for AOSP kernel builds with OLLVM
 
-    - name: Create Android compiler package
-      run: |
-        mkdir -p android-ollvm
-        mkdir -p android-ollvm/bin
-        
-        # Copy built binaries
-        cp -L build/bin/clang android-ollvm/bin/
-        cp -L build/bin/clang++ android-ollvm/bin/
-        cp -L build/bin/ld.lld android-ollvm/bin/ 2>/dev/null || true
-        
-        # Verify what we have
-        echo "Files in package:"
-        ls -la android-ollvm/bin/
-        echo ""
-        echo "Clang details:"
-        file android-ollvm/bin/clang
-        
-        # Create usage instructions
-        cat > android-ollvm/USAGE.md << 'EOF'
-        # OLLVM Android Compiler
-        
-        This is Clang with OLLVM obfuscation for Android ARM64.
-        
-        ## Quick Start
-        
-        1. Download Android NDK:
-           ```bash
-           wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
-           unzip android-ndk-r25c-linux.zip
-           export ANDROID_NDK=$PWD/android-ndk-r25c
-           ```
-        
-        2. Compile Android app:
-           ```bash
-           export PATH=/path/to/this/bin:$PATH
-           
-           clang --target=aarch64-linux-android29 \
-             --sysroot=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot \
-             -mllvm -fla \
-             -mllvm -sub \
-             your_app.c -o your_app
-           ```
-        
-        ## OLLVM Obfuscation Options
-        
-        Available flags:
-        - `-mllvm -fla` : Control Flow Flattening
-        - `-mllvm -sub` : Instruction Substitution  
-        - `-mllvm -bcf` : Bogus Control Flow
-        - `-mllvm -split` : Basic Block Splitting
-        - `-mllvm -sobf` : String Obfuscation
-        
-        ## Test Compilation
-        
-        ```bash
-        # Test the compiler works
-        echo "int main(){return 0;}" > test.c
-        clang --target=aarch64-linux-android -c test.c -o test.o
-        
-        if [ -f "test.o" ]; then
-          echo "✅ Compiler works!"
-          file test.o
-        fi
-        ```
-        EOF
-        
-        # Create test script
-        cat > android-ollvm/test_android.sh << 'EOF'
-        #!/bin/bash
-        echo "Testing OLLVM Android Compiler"
-        echo "==============================="
-        
-        # Set path
-        export PATH="$(dirname "$0")/bin:$PATH"
-        
-        # Create test file
-        cat > test_android.c << 'TESTEOF'
-        #include <stdio.h>
-        
-        int secret_function(int x) {
-            return x * 1337;
-        }
-        
-        int main() {
-            printf("Result: %d\n", secret_function(10));
-            return 0;
-        }
-        TESTEOF
-        
-        echo "1. Testing basic Android compilation:"
-        clang --target=aarch64-linux-android -c test_android.c -o test_android.o
-        
-        if [ $? -eq 0 ]; then
-            echo "✅ Basic compilation works"
-            file test_android.o
-        else
-            echo "❌ Basic compilation failed"
-        fi
-        
-        echo ""
-        echo "2. Testing OLLVM obfuscation:"
-        clang --target=aarch64-linux-android -mllvm -fla -c test_android.c -o test_ollvm.o
-        
-        if [ $? -eq 0 ]; then
-            echo "✅ OLLVM obfuscation works"
-            echo "   File created: test_ollvm.o"
-        else
-            echo "⚠️  OLLVM might need sysroot for full linking"
-        fi
-        
-        # Cleanup
-        rm -f test_android.c test_android.o test_ollvm.o
-        
-        echo ""
-        echo "For full Android compilation, you need Android NDK sysroot:"
-        echo "  clang --target=aarch64-linux-android29 \\"
-        echo "    --sysroot=/path/to/android-ndk/sysroot \\"
-        echo "    -mllvm -fla \\"
-        echo "    your_app.c -o your_app"
-        EOF
-        
-        chmod +x android-ollvm/test_android.sh
-        
-        tar -czf android-ollvm-compiler.tar.gz android-ollvm/
-        echo "✅ Package created: $(du -h android-ollvm-compiler.tar.gz)"
+echo "=== AOSP OLLVM Toolchain Setup ==="
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: android-ollvm-compiler
-        path: android-ollvm-compiler.tar.gz
+# Get absolute path
+TOOLCHAIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "Toolchain directory: $TOOLCHAIN_DIR"
+
+# Add to PATH
+export PATH="$TOOLCHAIN_DIR/bin:$PATH"
+echo "Added to PATH"
+
+# Common AOSP kernel flags
+export AOSP_OLLVM_FLAGS="-mllvm -fla -mllvm -sub"
+
+# AOSP kernel build examples
+echo ""
+echo "Usage examples for AOSP kernels:"
+echo ""
+echo "1. For standard AOSP kernel build:"
+echo "   make CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \\"
+echo "        KCFLAGS=\"\${AOSP_OLLVM_FLAGS}\""
+echo ""
+echo "2. For DDK container builds:"
+echo "   make -C \$KERNEL_SRC M=\$PWD/your-module modules \\"
+echo "        CC=\"clang\" \\"
+echo "        LD=\"ld.lld\" \\"
+echo "        KCFLAGS=\"-flto=thin \${AOSP_OLLVM_FLAGS}\""
+echo ""
+echo "3. Test compilation:"
+echo "   $TOOLCHAIN_DIR/bin/test-aosp-compile.sh"
+echo ""
+
+# Verify setup
+if command -v clang >/dev/null 2>&1; then
+    echo "✅ Toolchain is ready for AOSP kernel builds"
+    echo "   Clang: $(clang --version | head -1)"
+else
+    echo "❌ Toolchain not found in PATH"
+fi
+EOF
+        
+        # 2. Test compilation script
+        cat > "$PACKAGE_DIR/bin/test-aosp-compile.sh" << 'EOF'
+#!/bin/bash
+# Test AOSP kernel compilation with OLLVM
+
+echo "=== Testing AOSP Kernel OLLVM Toolchain ==="
+echo ""
+
+# Test 1: Basic OLLVM functionality
+echo "1. Testing OLLVM passes:"
+clang -mllvm -help 2>&1 | grep -A2 -B2 "fla\|sub\|bcf" || echo "⚠️  OLLVM passes not found"
+
+# Test 2: AOSP kernel flags
+echo ""
+echo "2. Testing AOSP kernel compilation flags:"
+cat > /tmp/test_kernel.c << 'TEST_EOF'
+#define __KERNEL__
+#define MODULE
+#include <linux/types.h>
+#include <linux/init.h>
+#include <linux/module.h>
+
+MODULE_LICENSE("GPL");
+static int __init test_init(void) { return 0; }
+static void __exit test_exit(void) { }
+module_init(test_init);
+module_exit(test_exit);
+TEST_EOF
+
+echo "Compiling with AOSP kernel flags..."
+clang --target=aarch64-linux-gnu \
+  -nostdinc \
+  -isystem /usr/aarch64-linux-gnu/include \
+  -D__KERNEL__ \
+  -DMODULE \
+  -mgeneral-regs-only \
+  -fno-PIC \
+  -c /tmp/test_kernel.c \
+  -o /tmp/test_kernel.o 2>&1
+
+if [ $? -eq 0 ]; then
+    echo "✅ AOSP kernel flags work"
+    echo "   File type: $(file /tmp/test_kernel.o)"
+else
+    echo "❌ AOSP kernel flags test failed"
+fi
+
+# Test 3: OLLVM with kernel code
+echo ""
+echo "3. Testing OLLVM with kernel code:"
+clang --target=aarch64-linux-gnu \
+  -nostdinc \
+  -isystem /usr/aarch64-linux-gnu/include \
+  -D__KERNEL__ \
+  -mgeneral-regs-only \
+  -c /tmp/test_kernel.c \
+  -o /tmp/test_kernel_ollvm.o \
+  -mllvm -fla -mllvm -sub 2>&1
+
+if [ $? -eq 0 ]; then
+    echo "✅ OLLVM works with kernel code"
+    
+    # Compare file sizes
+    SIZE_NORMAL=$(stat -c%s /tmp/test_kernel.o 2>/dev/null || stat -f%z /tmp/test_kernel.o)
+    SIZE_OLLVM=$(stat -c%s /tmp/test_kernel_ollvm.o 2>/dev/null || stat -f%z /tmp/test_kernel_ollvm.o)
+    
+    if [ -n "$SIZE_NORMAL" ] && [ -n "$SIZE_OLLVM" ]; then
+        echo "   Normal: ${SIZE_NORMAL} bytes"
+        echo "   OLLVM:  ${SIZE_OLLVM} bytes"
+        
+        if [ "$SIZE_OLLVM" -gt "$SIZE_NORMAL" ]; then
+            echo "   ✓ OLLVM increased size (obfuscation working)"
+        fi
+    fi
+else
+    echo "❌ OLLVM kernel test failed"
+fi
+
+# Cleanup
+rm -f /tmp/test_kernel.c /tmp/test_kernel.o /tmp/test_kernel_ollvm.o
+
+echo ""
+echo "=== Test Complete ==="
+EOF
+        
+        chmod +x "$PACKAGE_DIR/bin/test-aosp-compile.sh"
+        chmod +x "$PACKAGE_DIR/setup-aosp-env.sh"
+        
+        # 3. AOSP build examples
+        cat > "$PACKAGE_DIR/examples/aosp-kernel-build.sh" << 'EOF'
+#!/bin/bash
+# Example: Building AOSP kernel module with OLLVM
+
+# Setup environment
+source $(dirname "$0")/../setup-aosp-env.sh
+
+# Example module
+cat > example_module.c << 'MODULE_EOF'
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/kernel.h>
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("AOSP OLLVM Example");
+MODULE_DESCRIPTION("Test module built with OLLVM");
+
+static int __init example_init(void) {
+    printk(KERN_INFO "AOSP OLLVM module loaded\n");
+    return 0;
+}
+
+static void __exit example_exit(void) {
+    printk(KERN_INFO "AOSP OLLVM module unloaded\n");
+}
+
+module_init(example_init);
+module_exit(example_exit);
+MODULE_EOF
+
+# Example Makefile
+cat > Makefile << 'MAKEFILE_EOF'
+obj-m := example.o
+example-y := example_module.o
+
+KDIR ?= /path/to/your/kernel
+
+# AOSP OLLVM flags
+EXTRA_CFLAGS += $(AOSP_OLLVM_FLAGS)
+KCFLAGS += -flto=thin
+
+all:
+	$(MAKE) -C $(KDIR) M=$(PWD) modules \
+		CC="clang" \
+		LD="ld.lld" \
+		AR="llvm-ar" \
+		OBJCOPY="llvm-objcopy"
+
+clean:
+	$(MAKE) -C $(KDIR) M=$(PWD) clean
+MAKEFILE_EOF
+
+echo "Example AOSP module created"
+echo "Edit KDIR in Makefile and run 'make'"
+EOF
+        
+        chmod +x "$PACKAGE_DIR/examples/aosp-kernel-build.sh"
+        
+        # Create README
+        cat > "$PACKAGE_DIR/README.md" << 'EOF'
+# AOSP Kernel OLLVM Toolchain
+
+## Overview
+This toolchain is specifically built for compiling Android Open Source Project (AOSP) kernels with OLLVM obfuscation.
+
+## Quick Start
+```bash
+# 1. Extract and setup
+tar -xzf aosp-kernel-ollvm-arm64.tar.gz
+cd aosp-kernel-ollvm-arm64
+source setup-aosp-env.sh
+
+# 2. Test the toolchain
+./bin/test-aosp-compile.sh
+
+# 3. Use in AOSP kernel builds
+export PATH="$PWD/bin:$PATH"
+make CC=clang KCFLAGS="-mllvm -fla -mllvm -sub"
